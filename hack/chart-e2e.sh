@@ -99,11 +99,18 @@ fi
 step "RBAC grants nothing extra"
 agent_sa="system:serviceaccount:$ns:natterjack-$release-agent"
 controller_sa="system:serviceaccount:$ns:natterjack-$release-controller"
-deny() { # subject verb resource [namespace]
-	if kubectl auth can-i --as="$1" "$2" "$3" ${4:+-n "$4"} >/dev/null 2>&1; then fail "$1 may $2 $3 ${4:-cluster-wide}"; fi
+# can_i subject verb resource[/subresource] [namespace]. kubectl reads
+# "pods/status" as a pod named status, so the subresource is passed apart.
+can_i() {
+	local res="${3%%/*}" sub=""
+	[[ "$3" == */* ]] && sub="${3#*/}"
+	kubectl auth can-i --as="$1" "$2" "$res" ${sub:+--subresource="$sub"} ${4:+-n "$4"} >/dev/null 2>&1
+}
+deny() {
+	if can_i "$@"; then fail "$1 may $2 $3 ${4:-cluster-wide}"; fi
 }
 allow() {
-	kubectl auth can-i --as="$1" "$2" "$3" ${4:+-n "$4"} >/dev/null 2>&1 || fail "$1 may not $2 $3 ${4:-cluster-wide}"
+	can_i "$@" || fail "$1 may not $2 $3 ${4:-cluster-wide}"
 }
 allow "$agent_sa" patch pods/status "$ns"
 allow "$agent_sa" list pods
