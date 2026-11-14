@@ -12,7 +12,7 @@ updates:
     commit-message:
       prefix: ci
   - package-ecosystem: gomod
-    directories: ["/site"]
+    directories: ["/", "/site"]
     schedule:
       interval: weekly
     cooldown:
