@@ -1,0 +1,16 @@
+# Site build output and caches
+site/public/
+site/resources/
+site/node_modules/
+site/.hugo_build.lock
+
+# Go build and test output
+bin/
+dist/
+cover.out
+*.test
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

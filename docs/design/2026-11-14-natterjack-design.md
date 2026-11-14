@@ -11,12 +11,20 @@ processing charge and most of the hourly charge.
 API group and tag prefix: `natterjack.io` (pending domain registration; one
 constant in the code, see "Open items").
 
+Release scope: v1.0.0 supports AWS (EKS and self-managed Kubernetes on EC2).
+The controller talks to the cloud only through a provider interface, so GCP,
+Azure and OCI are added as providers without changes to the API, the agent or
+the data path. Their slot designs below record the research done so far; they
+are not part of v1.0.0 and are not documented as supported until each has its
+own end-to-end suite.
+
 ## 1. Goals and non-goals
 
 Goals:
 
 1. Outbound IPv4 internet access for pods and nodes in private subnets, without
-   a managed NAT gateway, on AWS, GCP, Azure and OCI.
+   a managed NAT gateway. AWS in v1.0.0; GCP, Azure and OCI through the same
+   provider interface afterwards.
 2. High availability inside a zone and across zones. Losing a gateway moves new
    flows to a surviving gateway in the same zone in well under a second.
 3. Throughput that scales with the number of gateways (active-active, no single
@@ -46,7 +54,7 @@ Verified against provider pricing on 2026-11-14 (sources in
 `docs/reference/pricing.md`, to be written with citations):
 
 | Cloud | Managed NAT charge | Natterjack charge |
-|---|---|---|
+| --- | --- | --- |
 | AWS | $0.045/hour per NAT gateway plus $0.045/GB processed (US East (Ohio) example on the VPC pricing page) | $0.005/hour per public IPv4 address; cross-AZ transfer ($0.01/GB each way) only while a zone has no healthy gateway |
 | GCP | Cloud NAT gateway fee plus $0.045/GiB processed | $0.005/hour per external IPv4 address in use |
 | Azure | $0.045/hour plus $0.045/GB processed (Standard NAT Gateway) | $0.005/hour per Standard static public IPv4 |
@@ -58,7 +66,7 @@ scope.
 ## 3. Prior art and the gap
 
 | Project | Clouds | CNI | HA model | Runs on existing nodes |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Cilium egress gateway (OSS) | Any | Cilium only, with kube-proxy replacement and BPF masquerade | One gateway per policy; failover is an open issue (cilium/cilium#18230). HA is in Isovalent Enterprise | Yes |
 | Azure kube-egress-gateway | Azure only | Chained CNI; not Azure CNI dynamic IP | At least two dedicated gateway nodes behind an internal load balancer | No |
 | Antrea Egress | Any, with per-cloud manual IP work | Antrea | Gossip election plus gratuitous ARP; on AWS the IP must also be assigned in EC2 by something else | Yes |
@@ -175,12 +183,13 @@ same sequence early.
 
 A slot is the unit the customer creates in IaC: a public IPv4 address bound to
 something the controller can move between nodes in one zone. The controller
-discovers slots by two tags or labels: `natterjack.io/egress=true` and
+discovers slots by two tags or labels (AWS is the v1.0.0 provider; the other
+rows are the researched designs for later providers): `natterjack.io/egress=true` and
 `natterjack.io/cluster=<cluster name>`. The cluster name is a required Helm
 value. The controller never writes tags.
 
 | Cloud | Slot | How the controller moves it | Node-traffic bootstrap route |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | AWS | A secondary ENI in a public subnet of the zone, with an Elastic IP associated in IaC, source/destination check disabled, a security group with no inbound rules | `AttachNetworkInterface` / `DetachNetworkInterface`. The Elastic IP is a property of the ENI and moves with it | Private subnet route `0.0.0.0/0` to the ENI, declared in IaC. It stays valid when the ENI moves, so the route table never changes |
 | OCI | A secondary VNIC subnet's secondary private IP with a reserved public IP, VNIC set to skip the source/destination check | Move the private IP between VNICs in the same subnet; the reserved public IP follows it. Each gateway node carries a VNIC in the public subnet | Route rule to the private IP, declared in IaC, unchanged on failover |
 | GCP | A reserved static external IPv4 address, labelled | Remove and add the access config on the gateway VM's NIC. GCP has no public-subnet requirement | None. GCP does not support GKE nodes as backends of an internal load balancer used as a route next hop, so node traffic is steered by the agent only. Before the agent runs, nodes rely on Private Google Access and an in-VPC registry |
@@ -275,7 +284,7 @@ results with the release.
 ## 8. Mistake handling
 
 | Situation | Behaviour |
-|---|---|
+| --- | --- |
 | More healthy slots than the cap | Extras stay unattached as `Spare` and replace failed slots first |
 | Fewer slots than zones need | Runs with what exists; `Degraded` per zone without in-zone redundancy |
 | A zone with no slots | Its pods use other zones; `CrossZoneEgress` with the cost reason; nodes there have no bootstrap route, reported |
@@ -355,12 +364,12 @@ moves and print a go or no-go report.
 These are settled by tests early in implementation; the design names the
 fallback for each.
 
-1. Azure: whether a public IP can be associated with an AKS scale-set node's
+1. Azure (not in v1.0.0): whether a public IP can be associated with an AKS scale-set node's
    NIC IP configuration at runtime, and whether a user-defined route can use an
    internal load balancer fronting AKS nodes as next hop. Fallback: slot as a
    public IP on a secondary IP configuration set at node-pool creation, agent
    steering only for node traffic.
-2. OCI: whether a secondary VNIC can be attached to a running OKE worker and
+2. OCI (not in v1.0.0): whether a secondary VNIC can be attached to a running OKE worker and
    whether moving a private IP between VNICs needs any instance state change.
 3. AWS VPC CNI: behaviour when an ENI tagged `no_manage` is moved into a
    network namespace, and on node reboot.

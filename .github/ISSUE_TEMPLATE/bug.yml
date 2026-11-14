@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go to the private advisory form, not here.
+        Run `natterjack doctor` and attach its output; it redacts account IDs and addresses.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Natterjack version
+      placeholder: v1.0.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Kubernetes distribution and version, CNI, service mesh
+      placeholder: EKS 1.35, VPC CNI 1.20, Istio ambient 1.28
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `natterjack doctor`
+      render: text
