@@ -1,0 +1,55 @@
+# Natterjack
+
+{{ template "chart.description" . }}
+
+{{ template "chart.versionBadge" . }}{{ template "chart.appVersionBadge" . }}
+
+Natterjack runs a controller and a node agent. The controller assigns egress
+slots (an elastic network interface with an Elastic IP on AWS) to nodes in each
+zone. The agents send selected pod traffic out through those slots. Only the
+controller holds cloud credentials.
+
+## Install
+
+```sh
+helm install natterjack oci://ghcr.io/tessarac-llc/charts/natterjack \
+  --namespace natterjack --create-namespace \
+  --set clusterName=<cluster> --set controller.aws.region=<region>
+```
+
+Before installing:
+
+- Give the controller's ServiceAccount (`<release>-controller` by default) the
+  IAM policy in `docs/aws/controller-policy.json`, using EKS Pod Identity or IRSA
+  (`controller.serviceAccount.annotations`).
+- Allow UDP `agent.tunnelPort` (6081 by default) between nodes in the node
+  security group.
+- Set `net.ipv4.conf.all.rp_filter` to 0 or 2 on every node. EKS AMIs already
+  do. The agent refuses to steer traffic on a node in strict mode and says so.
+
+## What the chart installs
+
+| Object | Why |
+| --- | --- |
+| CRDs: `EgressPool`, `EgressPolicy`, `ClusterEgressPolicy` | The API. Kept on uninstall unless `crds.keep=false`. |
+| Controller Deployment, two replicas | Leader election through the `natterjack-controller` Lease. |
+| Agent DaemonSet on every Linux node | Privileged with host networking: it programs nftables, routes, rules, GENEVE links and conntrack, and pins the gateway network namespace under `agent.stateDir`. |
+| ClusterRoles and Roles | Exactly the API calls each binary makes. |
+| ValidatingAdmissionPolicies | An agent may change only its own pod's status. The controller may change only `natterjack.io/` labels and annotations, and only on agent pods. |
+
+The release namespace must allow privileged pods. With `namespace.create=true`
+the chart creates the namespace with the Pod Security `privileged` label.
+Otherwise it refuses to install into a namespace that enforces a stricter
+level. Do not combine `namespace.create=true` with Helm's `--create-namespace`.
+
+Uninstalling removes every kernel object the agents created. The CRDs stay.
+
+{{ template "chart.requirementsSection" . }}
+
+## Values
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+{{- range .Values }}
+| `{{ .Key }}` | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
+{{- end }}

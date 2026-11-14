@@ -1,0 +1,77 @@
+{{- if .Values.agent.enabled }}
+{{- $name := printf "%s-agent" (include "natterjack.fullname" .) }}
+{{- $labels := include "natterjack.componentLabels" (dict "root" . "component" "agent") }}
+# Cluster-wide reads the agent needs to compute its node's data path. It
+# lists pods only with a field selector for its own node; RBAC cannot express
+# that restriction, so the grant is cluster-wide. It holds no write access
+# outside its own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [natterjack.io]
+    resources: [egresspools, egresspolicies, clusteregresspolicies]
+    verbs: [get, list, watch]
+  # Metrics require an authenticated, authorized caller.
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "natterjack.agent.serviceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# In the release namespace: report the gateway-ready condition on its own pod
+# (the admission policy enforces "own"), and read its DaemonSet at shutdown
+# to tell an uninstall from a restart.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [patch]
+  - apiGroups: [apps]
+    resources: [daemonsets]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "natterjack.agent.serviceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -1,0 +1,14 @@
+{{- if and .Values.controller.enabled .Values.controller.podDisruptionBudget.enabled (gt (int .Values.controller.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "natterjack.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.controller.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "natterjack.selectorLabels" (dict "root" . "component" "controller") | nindent 6 }}
+{{- end }}

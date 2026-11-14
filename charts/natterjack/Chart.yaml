@@ -1,0 +1,39 @@
+apiVersion: v2
+name: natterjack
+description: Highly available, zone-aware egress gateways for Kubernetes that replace cloud NAT gateways.
+type: application
+version: 0.0.0-dev
+appVersion: 0.0.0-dev
+kubeVersion: ">=1.34.0-0"
+home: https://natterjack.io
+sources:
+  - https://github.com/Tessarac-LLC/natterjack
+keywords:
+  - egress
+  - nat
+  - gateway
+  - networking
+  - aws
+maintainers:
+  - name: Tessarac, LLC
+    url: https://github.com/Tessarac-LLC
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/category: networking
+  artifacthub.io/operator: "true"
+  artifacthub.io/crds: |
+    - kind: EgressPool
+      version: v1alpha1
+      name: egresspools.natterjack.io
+      displayName: EgressPool
+      description: A set of egress slots and how traffic is spread across them.
+    - kind: EgressPolicy
+      version: v1alpha1
+      name: egresspolicies.natterjack.io
+      displayName: EgressPolicy
+      description: Selects pods in one namespace whose traffic leaves through a pool.
+    - kind: ClusterEgressPolicy
+      version: v1alpha1
+      name: clusteregresspolicies.natterjack.io
+      displayName: ClusterEgressPolicy
+      description: Selects pods across namespaces, or node traffic, for a pool.

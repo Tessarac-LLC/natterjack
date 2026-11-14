@@ -50,6 +50,7 @@ import (
 	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
 	"github.com/Tessarac-LLC/natterjack/internal/agent"
 	"github.com/Tessarac-LLC/natterjack/internal/agent/dataplane"
+	"github.com/Tessarac-LLC/natterjack/internal/retry"
 )
 
 // Dataplane is the node's kernel state.
@@ -151,7 +152,7 @@ func (a *Agent) SetupWithManager(mgr ctrl.Manager, gateways cache.Cache) error {
 		WatchesRawSource(source.Kind[client.Object](gateways, &corev1.Pod{}, all)).
 		WatchesRawSource(source.Channel(probes, all)).
 		WatchesRawSource(source.Channel(a.wake, all)).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1, RateLimiter: retry.Limiter(a.Resync)}).
 		Complete(a)
 	if err != nil {
 		return fmt.Errorf("set up agent: %w", err)

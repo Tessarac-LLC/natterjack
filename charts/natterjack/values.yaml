@@ -1,0 +1,168 @@
+# Natterjack Helm values. Every value is described in the values reference at
+# https://natterjack.io/docs/reference/helm-values/ and validated by
+# values.schema.json.
+
+# -- Name of this cluster. The controller only uses egress slots tagged
+# `natterjack.io/cluster=<clusterName>`. Required.
+clusterName: ""
+
+namespace:
+  # -- Create the release namespace with the Pod Security "privileged" label
+  # the agent needs. When false, the chart checks that the existing namespace
+  # carries the label and fails with a clear message if it does not.
+  create: false
+
+crds:
+  # -- Install and upgrade the CustomResourceDefinitions with the chart.
+  install: true
+  # -- Keep the CRDs, and every pool and policy, when the release is
+  # uninstalled.
+  keep: true
+
+images:
+  # -- Pull policy for both images.
+  pullPolicy: IfNotPresent
+  # -- Image pull secrets, by name, for both components.
+  pullSecrets: []
+
+controller:
+  # -- Install the controller. Only one controller runs per cluster.
+  enabled: true
+  image:
+    # -- Controller image repository.
+    repository: ghcr.io/tessarac-llc/natterjack-controller
+    # -- Defaults to the chart's appVersion.
+    tag: ""
+    # -- Pin by digest; takes precedence over the tag.
+    digest: ""
+  # -- Two replicas with leader election keep a controller ready to act when
+  # one is evicted.
+  replicas: 2
+  # -- How often the controller re-reads the cloud when nothing changes.
+  resync: 30s
+  aws:
+    # -- AWS region of the cluster's VPC. Required when the controller is
+    # enabled.
+    region: ""
+  serviceAccount:
+    # -- ServiceAccount name. Defaults to `<release>-controller`.
+    name: ""
+    # -- Annotations, for example eks.amazonaws.com/role-arn for IRSA. EKS
+    # Pod Identity needs none.
+    annotations: {}
+  # -- Log level: debug, info or error.
+  logLevel: info
+  # -- Controller container resources. Memory grows with the number of
+  # nodes and pods the controller watches.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # -- Controller pods run on Linux nodes. Add your own constraints here.
+  nodeSelector:
+    kubernetes.io/os: linux
+  # -- Tolerations for controller pods.
+  tolerations: []
+  # -- Affinity for controller pods.
+  affinity: {}
+  # -- Defaults spread replicas over zones and nodes.
+  topologySpreadConstraints: []
+  # -- The controller keeps egress working, so it is scheduled ahead of
+  # ordinary workloads.
+  priorityClassName: system-cluster-critical
+  # -- Extra annotations on controller pods.
+  podAnnotations: {}
+  # -- Extra labels on controller pods.
+  podLabels: {}
+  ports:
+    # -- Port for the controller's metrics, which require an authorized
+    # Kubernetes identity.
+    metrics: 8443
+    # -- Port for the controller's liveness and readiness probes.
+    health: 8081
+  podDisruptionBudget:
+    # -- Limit voluntary disruptions when more than one replica runs.
+    enabled: true
+    # -- Controller pods a voluntary disruption may take down at once.
+    maxUnavailable: 1
+
+agent:
+  # -- Install the agent DaemonSet.
+  enabled: true
+  image:
+    # -- Agent image repository.
+    repository: ghcr.io/tessarac-llc/natterjack-agent
+    # -- Defaults to the chart's appVersion.
+    tag: ""
+    # -- Pin by digest; takes precedence over the tag.
+    digest: ""
+  # -- Destinations never steered, in addition to private, shared,
+  # link-local and reserved ranges. Add any public ranges your VPC uses.
+  excludedCIDRs: []
+  # -- Packet mark bits the agent owns: one contiguous run of at least four
+  # bits that no other component on the node uses.
+  markMask: "0x00ff0000"
+  # -- First policy routing table the agent owns.
+  routeTableBase: 7700
+  # -- Priority of the agent's policy routing rules.
+  rulePriority: 7700
+  # -- GENEVE UDP port between nodes. Node security groups must allow it
+  # between nodes.
+  tunnelPort: 6081
+  # -- UDP port gateways answer probes on, inside their namespace.
+  probePort: 6086
+  # -- Link-local /30 between the host and gateway namespaces.
+  gatewayLink: 169.254.73.0/30
+  # -- TCP MSS ceiling for flows leaving a slot.
+  mss: 1460
+  # -- Host directory for the gateway namespace mount and the mark table. It
+  # must be on a filesystem a reboot empties (a tmpfs under /run).
+  stateDir: /run/natterjack
+  selfTest:
+    # -- URL that answers with the caller's public IPv4 address.
+    url: https://checkip.amazonaws.com
+    # -- How often a gateway tests its slot.
+    interval: 30s
+  # -- How often the data path is re-applied when nothing changes.
+  resync: 30s
+  # -- Log level: debug, info or error.
+  logLevel: info
+  # -- Agent container resources. A gateway node's forwarding happens in the
+  # kernel and is not counted here.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+  # -- The agent runs on every Linux node. Narrow this only if some nodes
+  # never send traffic through Natterjack and never serve as gateways.
+  nodeSelector:
+    kubernetes.io/os: linux
+  # -- The agent tolerates every taint by default so it runs on every node.
+  tolerations:
+    - operator: Exists
+  # -- Affinity for agent pods.
+  affinity: {}
+  # -- A node without its agent sends no traffic through Natterjack, so the
+  # agent is scheduled ahead of ordinary workloads.
+  priorityClassName: system-node-critical
+  # -- Extra annotations on agent pods.
+  podAnnotations: {}
+  # -- Extra labels on agent pods.
+  podLabels: {}
+  ports:
+    # -- Host port for the agent's metrics, which require an authorized
+    # Kubernetes identity.
+    metrics: 9751
+    # -- Host port for the agent's liveness and readiness probes.
+    health: 9752
+  updateStrategy:
+    # -- Agents restarted at once during an upgrade. Each restart moves that
+    # node's gateway role to another node in its zone.
+    maxUnavailable: 1
+  serviceAccount:
+    # -- ServiceAccount name. Defaults to `<release>-agent`.
+    name: ""

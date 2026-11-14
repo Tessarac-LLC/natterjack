@@ -1,0 +1,21 @@
+{{- if .Values.namespace.create }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "natterjack.labels" . | nindent 4 }}
+    # The agent runs privileged with host networking.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged
+  annotations:
+    helm.sh/resource-policy: keep
+{{- else if .Values.agent.enabled }}
+{{- with lookup "v1" "Namespace" "" .Release.Namespace }}
+{{- $enforce := dig "metadata" "labels" "pod-security.kubernetes.io/enforce" "" . }}
+{{- if and $enforce (ne $enforce "privileged") }}
+{{- fail (printf "namespace %s enforces Pod Security %q; the agent needs \"privileged\". Label it pod-security.kubernetes.io/enforce=privileged, or install with namespace.create=true into a new namespace." $.Release.Namespace $enforce) }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,114 @@
+{{- if .Values.controller.enabled }}
+{{- $selector := include "natterjack.selectorLabels" (dict "root" . "component" "controller") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "natterjack.fullname" . }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- $selector | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 8 }}
+        {{- with .Values.controller.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.controller.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "natterjack.controller.serviceAccount" . }}
+      {{- include "natterjack.pullSecrets" . | nindent 6 }}
+      priorityClassName: {{ .Values.controller.priorityClassName }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: controller
+          image: {{ include "natterjack.image" (dict "root" . "image" .Values.controller.image) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - --cluster-name={{ .Values.clusterName }}
+            - --agent-selector={{ include "natterjack.agentSelector" . }}
+            - --metrics-bind-address=:{{ .Values.controller.ports.metrics }}
+            - --health-probe-bind-address=:{{ .Values.controller.ports.health }}
+            - --resync={{ .Values.controller.resync }}
+            - --zap-log-level={{ .Values.controller.logLevel }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            - name: AWS_REGION
+              value: {{ .Values.controller.aws.region | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.controller.ports.metrics }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.controller.ports.health }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      topologySpreadConstraints:
+      {{- if .Values.controller.topologySpreadConstraints }}
+        {{- toYaml .Values.controller.topologySpreadConstraints | nindent 8 }}
+      {{- else }}
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- $selector | nindent 14 }}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- $selector | nindent 14 }}
+      {{- end }}
+{{- end }}

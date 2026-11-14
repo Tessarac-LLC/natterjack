@@ -1,0 +1,12 @@
+{{- if .Values.crds.install }}
+{{- range $path, $_ := .Files.Glob "files/crds/*.yaml" }}
+{{- $crd := $.Files.Get $path | fromYaml }}
+{{- $meta := $crd.metadata }}
+{{- $_ := set $meta "labels" (merge (default dict $meta.labels) (include "natterjack.labels" $ | fromYaml)) }}
+{{- if $.Values.crds.keep }}
+{{- $_ := set $meta "annotations" (merge (default dict $meta.annotations) (dict "helm.sh/resource-policy" "keep")) }}
+{{- end }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

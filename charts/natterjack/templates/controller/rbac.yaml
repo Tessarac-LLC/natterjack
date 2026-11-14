@@ -1,0 +1,123 @@
+{{- if .Values.controller.enabled }}
+{{- $name := printf "%s-controller" (include "natterjack.fullname" .) }}
+{{- $labels := include "natterjack.componentLabels" (dict "root" . "component" "controller") }}
+# Cluster-wide reads the controller needs: nodes to pick gateways, pools to
+# assign slots, policies to report their status.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [natterjack.io]
+    resources: [egresspools, egresspolicies, clusteregresspolicies]
+    verbs: [get, list, watch]
+  - apiGroups: [natterjack.io]
+    resources: [egresspools/status]
+    verbs: [patch]
+  - apiGroups: [natterjack.io]
+    resources: [egresspolicies/status, clusteregresspolicies/status]
+    verbs: [update]
+  # Metrics require an authenticated, authorized caller.
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "natterjack.controller.serviceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# In the release namespace: label agent pods as gateways (the admission
+# policy limits this to agent pods), hold the leader lease, record events
+# on agent pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [natterjack-controller]
+    verbs: [get, update]
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+  # Leader election records its transitions through the core events API.
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "natterjack.controller.serviceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if ne .Release.Namespace "default" }}
+---
+# Events about cluster-scoped objects (pools) are recorded in "default".
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-events
+  namespace: default
+  labels:
+    {{- $labels | nindent 4 }}
+rules:
+  - apiGroups: [events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-events
+  namespace: default
+  labels:
+    {{- $labels | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-events
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "natterjack.controller.serviceAccount" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

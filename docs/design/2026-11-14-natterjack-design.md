@@ -367,6 +367,7 @@ results with the release.
 | Slot deleted by IaC while in use | Traffic steers away; reported |
 | Node at its interface limit | Another node is chosen |
 | Workload identity misconfigured | Controller `Ready=false` with the exact failing call and the expected trust policy subject for the namespace and ServiceAccount in use |
+| A reconcile keeps failing | Retried with exponential backoff from 100 ms, capped at the resync interval, so a fixed problem is picked up within one resync |
 
 `natterjack doctor` (CLI) and `helm test` run all checks before any traffic
 moves and print a go or no-go report.
@@ -400,6 +401,13 @@ moves and print a go or no-go report.
 - Agent tests with envtest: the gateway-ready condition through pending,
   serving, self-test failure and recovery, draining and unassignment, probe
   replies, and refusing a pod that does not match the agent selector.
+- Chart tests on every pull request: `helm lint`, every rendering validated
+  against the Kubernetes schemas, and every bad value refused with a clear
+  message (`make chart-lint`); then a kind install on the oldest and newest
+  supported Kubernetes (`make chart-e2e`) proving no RBAC denials, no grant
+  beyond what each binary uses, both admission policies with pod-bound
+  tokens, recovery within one resync, and an uninstall that leaves no kernel
+  objects behind.
 - Data-plane integration tests in kind: steering, failover timing, conntrack
   behaviour, MSS clamping, isolation rules, both nftables and eBPF modes.
 - End-to-end on real clusters per cloud (EKS, GKE, AKS, OKE). CI builds the
@@ -434,6 +442,11 @@ moves and print a go or no-go report.
   pricing comparison; `SECURITY.md`; mesh reference architecture;
   troubleshooting by status condition; Helm values reference with every value
   explained and annotated examples for each cloud.
+- Kubernetes 1.34 or later: ValidatingAdmissionPolicy and the pod-name claim in
+  bound ServiceAccount tokens are GA there.
+- The values reference in the chart README is generated from `values.yaml` by
+  helm-docs, and CI fails when it is stale. `values.schema.json` rejects
+  unknown keys and malformed values before anything renders.
 - The chart lets customers choose the namespace and which components to
   install. Nothing looks up another component by a fixed namespace. The chart
   can create the namespace with the Pod Security `privileged` label or verify

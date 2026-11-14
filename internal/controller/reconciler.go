@@ -37,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,6 +46,7 @@ import (
 
 	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
 	"github.com/Tessarac-LLC/natterjack/internal/cloud"
+	"github.com/Tessarac-LLC/natterjack/internal/retry"
 )
 
 // Disruption taints set by tools that remove nodes.
@@ -104,6 +106,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1.EgressPool{}, all, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Node{}, all, builder.WithPredicates(nodeChanged)).
 		Watches(&corev1.Pod{}, all, builder.WithPredicates(agents)).
+		WithOptions(controller.Options{RateLimiter: retry.Limiter(r.Resync)}).
 		Complete(r)
 	if err != nil {
 		return fmt.Errorf("set up egresspool controller: %w", err)
