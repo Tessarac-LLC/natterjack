@@ -1,0 +1,62 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadNetworking",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSecurityGroups"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "MoveOnlyThisClustersEgressENIs",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AttachNetworkInterface",
+        "ec2:DetachNetworkInterface"
+      ],
+      "Resource": "arn:*:ec2:*:*:network-interface/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/natterjack.io/egress": "true",
+          "aws:ResourceTag/natterjack.io/cluster": "CLUSTER_NAME"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyOnThisClustersEKSNodes",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AttachNetworkInterface",
+        "ec2:DetachNetworkInterface"
+      ],
+      "Resource": "arn:*:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/aws:eks:cluster-name": "CLUSTER_NAME"
+        }
+      }
+    },
+    {
+      "Sid": "OnlyOnThisClustersSelfManagedNodes",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AttachNetworkInterface",
+        "ec2:DetachNetworkInterface"
+      ],
+      "Resource": "arn:*:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/kubernetes.io/cluster/CLUSTER_NAME": [
+            "owned",
+            "shared"
+          ]
+        }
+      }
+    }
+  ]
+}
