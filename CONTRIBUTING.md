@@ -46,7 +46,7 @@ Commits made in the GitHub web editor are signed off automatically.
 | `scan / secrets` | TruffleHog on the pull request's changes |
 | `scan / dependencies` | GitHub dependency review: no new vulnerable or disallowed-licence dependencies |
 | `site / build` | The website builds with no broken internal links |
-| `go / lint`, `go / test`, `go / vuln` | golangci-lint, unit and envtest suites with the race detector, govulncheck |
+| `go / lint`, `go / test`, `go / vuln`, `go / codeql` | generated files up to date, golangci-lint, unit and envtest suites with the race detector, govulncheck, CodeQL security queries |
 | `helm / lint` | helm lint, chart-testing, schema and kubeconform validation |
 | `images / build` | Multi-arch images build; Trivy finds no fixable HIGH/CRITICAL vulnerabilities |
 | `e2e / kind` | The end-to-end suite on a kind cluster: data path, failover and the security tests |
