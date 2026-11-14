@@ -155,10 +155,20 @@ as() { # token, kubectl args...
 }
 whoami="$(as "$agent_token" auth whoami -o jsonpath='{.status.userInfo.username}')"
 [[ "$whoami" == "$agent_sa" ]] || fail "the agent token authenticates as $whoami"
-condition='{"status":{"conditions":[{"type":"natterjack.io/e2e","status":"True","reason":"Test","message":"admission test"}]}}'
-as "$agent_token" -n "$ns" patch pod "${agents[0]}" --subresource=status --type=strategic -p "$condition" >/dev/null ||
-	fail "an agent may not change its own pod's status"
-if out="$(as "$agent_token" -n "$ns" patch pod "${agents[1]}" --subresource=status --type=strategic -p "$condition" 2>&1)"; then
+# kubectl patch reads the object first, and the agent may only patch pod
+# status, so the patch goes to the API directly, as the agent sends it.
+patch_status() { # token, pod; prints the response, fails unless 2xx
+	local code
+	code="$(curl -sS --cacert "$work/ca.crt" -H "Authorization: Bearer $1" \
+		-H 'Content-Type: application/strategic-merge-patch+json' -X PATCH \
+		--data '{"status":{"conditions":[{"type":"natterjack.io/e2e","status":"True","reason":"Test","message":"admission test"}]}}' \
+		-o "$work/patch.out" -w '%{http_code}' "$server/api/v1/namespaces/$ns/pods/$2/status")"
+	cat "$work/patch.out"
+	[[ "$code" == 2* ]]
+}
+patch_status "$agent_token" "${agents[0]}" >/dev/null ||
+	fail "an agent may not change its own pod's status: $(cat "$work/patch.out")"
+if out="$(patch_status "$agent_token" "${agents[1]}")"; then
 	fail "an agent changed another agent's status"
 fi
 grep -q "only change its own pod" <<<"$out" || fail "denied for the wrong reason: $out"
