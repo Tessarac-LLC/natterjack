@@ -125,6 +125,10 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 			MAC:         aws.ToString(e.MacAddress),
 			SubnetID:    aws.ToString(e.SubnetId),
 			RouteTarget: routeTargets[aws.ToString(e.NetworkInterfaceId)],
+			Tags:        make(map[string]string, len(e.TagSet)),
+		}
+		for _, t := range e.TagSet {
+			s.Tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
 		}
 		if e.Association != nil {
 			s.PublicIP = aws.ToString(e.Association.PublicIp)
@@ -320,6 +324,34 @@ func (p *Provider) inCluster(tags []types.Tag) bool {
 // providerID is aws:///<zone>/<instance-id>.
 var providerID = regexp.MustCompile(`^aws:///([a-z0-9-]+)/(i-[0-9a-f]+)$`)
 
+// Strays implements cloud.Provider.
+func (p *Provider) Strays(ctx context.Context, clusterName string) ([]cloud.Stray, error) {
+	var out []cloud.Stray
+	pager := ec2.NewDescribeNetworkInterfacesPaginator(p.ec2, &ec2.DescribeNetworkInterfacesInput{
+		Filters: []types.Filter{{Name: aws.String("tag:" + v1.TagEgress), Values: []string{"true"}}},
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe network interfaces: %w", err)
+		}
+		for i := range page.NetworkInterfaces {
+			e := &page.NetworkInterfaces[i]
+			cluster := ""
+			for _, t := range e.TagSet {
+				if aws.ToString(t.Key) == v1.TagCluster {
+					cluster = aws.ToString(t.Value)
+				}
+			}
+			if cluster != clusterName {
+				out = append(out, cloud.Stray{ID: aws.ToString(e.NetworkInterfaceId), Zone: aws.ToString(e.AvailabilityZone), Cluster: cluster})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 // InstanceForProviderID implements cloud.Provider.
 func (p *Provider) InstanceForProviderID(id string) (cloud.Instance, error) {
 	m := providerID.FindStringSubmatch(id)
@@ -381,7 +413,7 @@ func freeDeviceIndex(inst *types.Instance) (int32, error) {
 }
 
 // Detach implements cloud.Provider.
-func (p *Provider) Detach(ctx context.Context, slotID string) error {
+func (p *Provider) Detach(ctx context.Context, slotID string, force bool) error {
 	eni, err := p.eni(ctx, slotID)
 	if err != nil {
 		return err
@@ -391,7 +423,7 @@ func (p *Provider) Detach(ctx context.Context, slotID string) error {
 		return nil
 	}
 	if a.Status != types.AttachmentStatusDetaching {
-		_, err = p.ec2.DetachNetworkInterface(ctx, &ec2.DetachNetworkInterfaceInput{AttachmentId: a.AttachmentId})
+		_, err = p.ec2.DetachNetworkInterface(ctx, &ec2.DetachNetworkInterfaceInput{AttachmentId: a.AttachmentId, Force: aws.Bool(force)})
 		if err != nil && !isNotFound(err) {
 			return fmt.Errorf("detach %s: %w", slotID, err)
 		}

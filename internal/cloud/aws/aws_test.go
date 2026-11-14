@@ -43,6 +43,7 @@ type fakeEC2 struct {
 	lastFilters []types.Filter
 	attaches    []ec2.AttachNetworkInterfaceInput
 	detaches    []string
+	forced      []bool
 	// detachPolls is how many describes a detaching ENI stays "detaching".
 	detachPolls int
 	polls       int
@@ -130,6 +131,7 @@ func (f *fakeEC2) AttachNetworkInterface(_ context.Context, in *ec2.AttachNetwor
 
 func (f *fakeEC2) DetachNetworkInterface(_ context.Context, in *ec2.DetachNetworkInterfaceInput, _ ...func(*ec2.Options)) (*ec2.DetachNetworkInterfaceOutput, error) {
 	f.detaches = append(f.detaches, aws.ToString(in.AttachmentId))
+	f.forced = append(f.forced, aws.ToBool(in.Force))
 	for _, e := range f.enis {
 		if e.Attachment != nil && aws.ToString(e.Attachment.AttachmentId) == aws.ToString(in.AttachmentId) {
 			e.Status = types.NetworkInterfaceStatusDetaching
@@ -404,13 +406,13 @@ func TestDetachWaitsUntilAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.detachPolls = 3
-	if err := p.Detach(context.Background(), "eni-a"); err != nil {
+	if err := p.Detach(context.Background(), "eni-a", false); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.detaches) != 1 || f.enis["eni-a"].Status != types.NetworkInterfaceStatusAvailable {
 		t.Fatalf("detach did not complete: %d calls, status %s", len(f.detaches), f.enis["eni-a"].Status)
 	}
-	if err := p.Detach(context.Background(), "eni-a"); err != nil || len(f.detaches) != 1 {
+	if err := p.Detach(context.Background(), "eni-a", false); err != nil || len(f.detaches) != 1 {
 		t.Fatalf("detaching a free ENI must be a no-op: %v, %d calls", err, len(f.detaches))
 	}
 }
@@ -423,7 +425,46 @@ func TestDetachTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.detachPolls = 1 << 30
-	if err := p.Detach(context.Background(), "eni-a"); err == nil || !strings.Contains(err.Error(), "still") {
+	if err := p.Detach(context.Background(), "eni-a", false); err == nil || !strings.Contains(err.Error(), "still") {
 		t.Fatalf("want a timeout error, got %v", err)
+	}
+}
+
+func TestForcedDetach(t *testing.T) {
+	f := newFake(goodENI("eni-a", "us-east-2a"))
+	p := newProvider(f)
+	if err := p.Attach(context.Background(), "eni-a", "i-0a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Detach(context.Background(), "eni-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.forced, []bool{true}) {
+		t.Fatalf("force not passed to EC2: %v", f.forced)
+	}
+}
+
+func TestSlotTags(t *testing.T) {
+	e := goodENI("eni-a", "us-east-2a")
+	e.TagSet = append(e.TagSet, tag(v1.TagPool, "partners"))
+	s := slots(t, newFake(e))["eni-a"]
+	if s.Tags[v1.TagPool] != "partners" || s.Tags[v1.TagCluster] != cluster {
+		t.Fatalf("tags not reported: %v", s.Tags)
+	}
+}
+
+func TestStrays(t *testing.T) {
+	typo := goodENI("eni-typo", "us-east-2a")
+	typo.TagSet[1] = tag(v1.TagCluster, "prdo")
+	missing := goodENI("eni-missing", "us-east-2b")
+	missing.TagSet = []types.Tag{tag(v1.TagEgress, "true")}
+	f := newFake(goodENI("eni-ours", "us-east-2a"), typo, missing)
+	got, err := newProvider(f).Strays(context.Background(), cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []cloud.Stray{{ID: "eni-missing", Zone: "us-east-2b"}, {ID: "eni-typo", Zone: "us-east-2a", Cluster: "prdo"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }

@@ -45,6 +45,8 @@ type Slot struct {
 	// RouteTarget is true when a route table sends traffic to this slot, so
 	// node traffic depends on it before agents steer anything.
 	RouteTarget bool
+	// Tags on the slot, used to match it to a pool.
+	Tags map[string]string
 	// Problems are failed safety checks, in plain language. A slot with any
 	// problem is quarantined and never attached.
 	Problems []string
@@ -57,6 +59,14 @@ func (s Slot) Usable() bool { return len(s.Problems) == 0 }
 type Instance struct {
 	ID   string
 	Zone string
+}
+
+// Stray is a slot tagged for egress whose cluster tag names another cluster
+// or is missing. It is never touched; it is reported so a typo is visible.
+type Stray struct {
+	ID      string
+	Zone    string
+	Cluster string
 }
 
 // Discovery selects slots.
@@ -77,8 +87,12 @@ type Provider interface {
 	// instance it is already attached to succeeds without change.
 	Attach(ctx context.Context, slotID, instanceID string) error
 	// Detach detaches the slot from whatever it is attached to and waits until
-	// it is free. Detaching an unattached slot succeeds without change.
-	Detach(ctx context.Context, slotID string) error
+	// it is free. Detaching an unattached slot succeeds without change. Force
+	// is for an instance that no longer responds.
+	Detach(ctx context.Context, slotID string, force bool) error
+	// Strays lists slots tagged for egress that belong to no cluster or to a
+	// cluster other than clusterName.
+	Strays(ctx context.Context, clusterName string) ([]Stray, error)
 }
 
 var (
