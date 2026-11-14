@@ -102,18 +102,46 @@ The only component with cloud credentials. It:
 
 **Agent** (DaemonSet on every Linux node). Holds no cloud credentials. On every
 node it steers selected traffic to gateways. On a node assigned a slot it also
-acts as the gateway. It needs `CAP_NET_ADMIN` and host networking, the same
-privilege a CNI plugin or kube-proxy has; this is the main privilege Natterjack
-adds to a cluster and the documentation says so.
+acts as the gateway. It runs privileged with host networking, as CNI plugins
+do: `CAP_NET_ADMIN` for nftables, routes, rules, links and conntrack, and
+`CAP_SYS_ADMIN` to create the gateway network namespace and pin it with a bind
+mount under `/run/natterjack` (a host path mounted with bidirectional
+propagation), so the namespace and the slot inside it survive an agent
+restart. This is the main privilege Natterjack adds to a cluster and the
+documentation says so. Its metrics are served on port 9751 with
+authentication and authorization through the API server, its health probes on
+port 9752.
+
+The agent reconciles one work item: on any change to its node's pods, all
+nodes, namespaces, policies, pools, gateway pods or probe results, and every
+30 seconds, it computes the whole desired data path and applies it. Each step
+replaces what is there, so a missed event costs at most one resync.
 
 ### 4.2 Gateway membership: Kubernetes-native
 
-A headless Service selects agent pods labelled `natterjack.io/gateway=true`.
-Each gateway agent pod has a readiness gate that the agent sets true only once
-its slot is attached, its isolated namespace is configured and a self-test to
-the internet passes. The EndpointSlices of that Service are therefore the list
-of working gateways, each with its zone, maintained by Kubernetes itself.
-Every agent watches them.
+The controller labels the agent pod on a gateway node
+`natterjack.io/gateway=true` with its pool, and annotates it with the slot
+assignment (slot ID, MAC, private IP, subnet CIDR, public IP, tunnel type).
+Every agent watches agent pods with that label, so the list of gateways, each
+with its node and zone, comes from Kubernetes itself with no extra objects.
+
+The gateway agent reports that it carries traffic through a pod condition,
+`natterjack.io/gateway-ready`, which it patches on its own pod's status. The
+condition is true only once the slot interface is in the isolated namespace
+with its address and routes, and a self-test through the slot has passed since
+serving began. Its message names the slot (`serving slot <id>`); the
+controller and every agent count the condition only when that slot matches
+the pod's current assignment, so a condition left over from an earlier slot
+never vouches for a new one. A custom condition rather than a pod readiness
+gate or a Service: the agent pod's own readiness stays about the agent, so a
+gateway problem never restarts or removes the agent that steers the node's
+own traffic.
+
+The self-test runs every 30 seconds: the agent resolves a check-IP service
+(`https://checkip.amazonaws.com` by default) in the host namespace, connects
+from inside the gateway namespace and requires the reply to be the slot's
+public IP. Readiness turns true on the first pass and false only after three
+consecutive failures, so one slow response does not move traffic.
 
 ### 4.3 Data path (all in the Linux kernel; no packet passes through Go)
 
@@ -131,8 +159,17 @@ Source node:
 3. Policy routing sends marked packets into a GENEVE tunnel to the chosen
    gateway's node IP. GENEVE rather than WireGuard by default: the traffic is
    bound for the internet, the tunnel stays inside the VPC, and encryption
-   costs CPU that limits throughput. WireGuard is a per-pool option.
-4. TCP MSS is clamped on steered flows to account for the tunnel header, so
+   costs CPU that limits throughput. WireGuard is a per-pool option. The
+   tunnel is one collect-metadata GENEVE device (`nj0`) carrying IP packets,
+   not Ethernet frames (Linux 5.18 or later); each gateway's routing table
+   sets the destination node per route. Each table also has a throw route for
+   the gateway's own node IP, so the tunnel's outer packets never loop back
+   into it. `nj0` has a host-scope /32 link-local address only so reverse
+   path filtering accepts replies arriving on it.
+4. Steered packets are source-translated to the node's IP as they enter the
+   tunnel, so replies return to this node whatever the pod network is; the
+   reverse translation by conntrack restores the pod address.
+5. TCP MSS is clamped on steered flows to account for the tunnel header, so
    clouds with a 1460 or 1500 byte VPC MTU work without fragmentation. On AWS
    the 9001 byte VPC MTU absorbs the header.
 
@@ -143,6 +180,10 @@ Gateway node:
 2. nftables in that namespace source-NATs to the slot's public IP and sends
    the packet out. Replies are reverse-translated by conntrack and returned
    through the tunnel to the source node.
+
+The agent refuses a node where `net.ipv4.conf.all.rp_filter` is 1 (strict),
+because replies from the tunnel would be dropped, and names the setting; EKS
+AMIs use 2.
 
 Throughput per zone is the sum of its gateways, bounded per gateway by the
 cloud's per-instance internet bandwidth and per flow by the cloud's per-flow
@@ -158,23 +199,31 @@ the mode can be forced in values.
 ### 4.4 Failure detection and failover
 
 - Each agent probes every gateway it may use with a small UDP echo sent
-  through the tunnel, so the probe tests the same path traffic takes. Default
-  interval 100 ms, three misses to declare down (about 300 ms), configurable.
+  through the tunnel, so the probe tests the same path traffic takes: the
+  probe socket carries the gateway's packet mark, the probe is translated to
+  the node's IP like steered traffic, and the gateway answers on the
+  gateway-namespace end of its internal link, accepting probes only from
+  cluster nodes. A probe is 12 bytes, a magic value and a sequence number;
+  the responder ignores anything else and answers only while it serves a
+  slot, including while draining, so draining gateways keep their existing
+  flows. Default interval 100 ms, three misses to declare down (about
+  300 ms), configurable per pool. One reply brings a gateway back.
 - A gateway declared down is removed from that node's hash table immediately.
   Conntrack entries marked for it are flushed so the affected flows re-hash on
   their next packet. Those connections reset at the remote end, because their
   public source IP has changed; this is unavoidable while the IP is held by one
   interface and is documented. New connections and retries succeed at once.
-- EndpointSlice readiness remains the source of truth for which gateways
-  exist; probes only decide which of them are alive from this node.
+- The gateway-ready condition remains the source of truth for which gateways
+  take new flows; probes only decide which of them are alive from this node.
 - Cross-zone fallback happens only when a zone has no live gateway, and is
   reported (`CrossZoneEgress` condition and metric) because it adds cost.
 
 ### 4.5 Planned disruption
 
 The controller watches nodes for cordon, drain and the Karpenter disruption
-taint. Before a gateway node goes away the agent sets its readiness false,
-agents stop sending new flows to it, existing flows get a configurable drain
+taint. Before a gateway node goes away the controller annotates the gateway
+pod `natterjack.io/drain-started`; the agent sets the gateway-ready condition
+false with reason `Draining`, agents stop sending new flows to it, existing flows get a configurable drain
 window (default 60 s), then the controller detaches the slot and attaches it
 to another eligible node in the same zone. Spot interruption notices start the
 same sequence early.
@@ -251,14 +300,37 @@ firewall allows all inbound traffic, nothing listens at the public IP.
    from the public side toward private addresses.
 4. Tunnel endpoints accept GENEVE only from cluster node IPs.
 
+Traffic injected into the tunnel meets four independent checks, each tested
+alone by an outsider on the same network that forges tunnel packets and
+probes:
+
+1. Host `input`: GENEVE packets from an address that is not a cluster node are
+   dropped before decapsulation.
+2. Host `prerouting`: a new flow arriving out of the tunnel whose inner source
+   is not a cluster node is dropped.
+3. Host `forward`: a new flow out of the tunnel may only go into the gateway
+   namespace, and only on a node that serves a slot; on any other node it is
+   dropped, so the tunnel can never be used to reach the node's networks.
+4. Gateway namespace `forward` and `input` default to drop: only flows from
+   cluster nodes through the internal link, and flows routed to the slot by a
+   VPC route before agents steer, leave; only replies and node probes enter.
+
+When the agent is uninstalled (its DaemonSet is gone or being deleted), it
+removes every kernel object it owns before exiting. A gateway namespace that
+still holds a slot interface stays until the controller detaches it, so the
+interface never returns to the host namespace.
+
 ### 7.3 Least privilege
 
 - Cloud credentials only in the controller, through workload identity (EKS
   Pod Identity or IRSA, GKE Workload Identity, Azure Workload Identity, OCI
   workload identity). The policy for each cloud ships as JSON or HCL.
 - AWS: attach and detach scoped by tag on the ENI and by
-  `aws:eks:cluster-name` on the instance. The `ec2:Describe*` calls cannot be
-  scoped to resources; the documentation says so.
+  `aws:eks:cluster-name` on the instance. The `ec2:Describe*` calls
+  (instances, network interfaces, subnets, route tables, security groups)
+  cannot be scoped to resources; the documentation says so. The controller
+  reads each slot's subnet CIDR so the agent can address the slot and route
+  through the subnet's router.
 - Kubernetes RBAC: minimal, listed line by line in the documentation.
 
 ### 7.4 Safety checks before a slot is used
@@ -320,6 +392,14 @@ moves and print a go or no-go report.
   row of section 8.
 - Controller tests with envtest and a fake cloud implementing the provider
   interface.
+- Data-plane tests in throwaway privileged containers on every pull request
+  (`make test-privileged`): a single node serving its own pods, stale-flow
+  flushing, and a three-node tunnel (gateway, source and outsider) covering
+  steering, translation, probes, the self-test through the slot and every
+  injection check of section 7.2.
+- Agent tests with envtest: the gateway-ready condition through pending,
+  serving, self-test failure and recovery, draining and unassignment, probe
+  replies, and refusing a pod that does not match the agent selector.
 - Data-plane integration tests in kind: steering, failover timing, conntrack
   behaviour, MSS clamping, isolation rules, both nftables and eBPF modes.
 - End-to-end on real clusters per cloud (EKS, GKE, AKS, OKE). CI builds the

@@ -38,6 +38,9 @@ type Slot struct {
 	MAC string
 	// SubnetID the slot lives in.
 	SubnetID string
+	// SubnetCIDR of that subnet. The agent addresses the slot with it and
+	// routes through the subnet's router.
+	SubnetCIDR string
 	// Instance the slot is attached to; empty when unattached.
 	Instance string
 	// InstanceInCluster reports whether Instance belongs to this cluster.

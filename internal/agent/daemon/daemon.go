@@ -1,0 +1,461 @@
+/*
+Copyright 2026 Tessarac, LLC.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package daemon runs the agent on one node: it reads the cluster, applies
+// the data path, probes gateways and, on a gateway node, answers probes,
+// tests the slot and reports the gateway ready.
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
+	"github.com/Tessarac-LLC/natterjack/internal/agent"
+	"github.com/Tessarac-LLC/natterjack/internal/agent/dataplane"
+)
+
+// Dataplane is the node's kernel state.
+type Dataplane interface {
+	Apply(want *agent.Desired) (dataplane.Status, error)
+	ListenProbe(ctx context.Context) (net.PacketConn, error)
+	DialGateway(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// SelfTester checks that traffic dialed through dial leaves from want.
+type SelfTester func(ctx context.Context, dial agent.Dialer, url string, want netip.Addr) error
+
+// Defaults when an EgressPool leaves probing unset.
+const (
+	defaultProbeInterval  = 100 * time.Millisecond
+	defaultProbeThreshold = 3
+	// selfTestFailures is how many consecutive self-test failures take a
+	// serving gateway out of service. One failure is often the test service.
+	selfTestFailures = 3
+	selfTestTimeout  = 10 * time.Second
+)
+
+// Agent reconciles one node. Every change, whatever its source, leads to the
+// same full computation, so there is one work item.
+type Agent struct {
+	// Client reads this node's pods, all nodes, namespaces, policies and
+	// pools from the cache.
+	Client client.Client
+	// Gateways reads the gateway agent pods.
+	Gateways client.Reader
+	// AgentSelector selects agent pods; only they can be gateways.
+	AgentSelector labels.Selector
+	Dataplane     Dataplane
+	Marks         *agent.Marks
+	Prober        *agent.Prober
+	// Node, Namespace and Pod identify this agent.
+	Node, Namespace, Pod string
+	// Excluded destinations are never steered.
+	Excluded []netip.Prefix
+	// SelfTestURL answers with the caller's public IPv4 address.
+	SelfTestURL      string
+	SelfTestInterval time.Duration
+	SelfTest         SelfTester
+	// Resync re-asserts the kernel state when nothing changes.
+	Resync time.Duration
+	Log    logr.Logger
+
+	wake      chan event.GenericEvent
+	ready     atomic.Bool
+	mu        sync.Mutex
+	responder *agent.Responder
+	test      selfTest
+	problems  string
+}
+
+// selfTest is the self-test of the slot being served.
+type selfTest struct {
+	key      string // slot and public IP under test; empty when idle
+	cancel   context.CancelFunc
+	done     chan struct{}
+	passed   bool // has passed since the key was set
+	failures int  // consecutive failures
+	err      error
+}
+
+// Ready reports whether the data path has been applied once; until then the
+// pod is not ready.
+func (a *Agent) Ready(*http.Request) error {
+	if !a.ready.Load() {
+		return fmt.Errorf("data path not applied yet")
+	}
+	return nil
+}
+
+// SetupWithManager watches everything the computation reads. gateways is the
+// cache behind a.Gateways.
+func (a *Agent) SetupWithManager(mgr ctrl.Manager, gateways cache.Cache) error {
+	a.wake = make(chan event.GenericEvent, 1)
+	all := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: a.Node}}}
+	})
+	probes := make(chan event.GenericEvent, 1)
+	go func() {
+		for range a.Prober.Changed() {
+			select {
+			case probes <- event.GenericEvent{Object: &corev1.Node{}}:
+			default:
+			}
+		}
+	}()
+	err := ctrl.NewControllerManagedBy(mgr).
+		Named("agent").
+		Watches(&corev1.Node{}, all).
+		Watches(&corev1.Pod{}, all).
+		Watches(&corev1.Namespace{}, all).
+		Watches(&v1.EgressPolicy{}, all).
+		Watches(&v1.ClusterEgressPolicy{}, all).
+		Watches(&v1.EgressPool{}, all).
+		WatchesRawSource(source.Kind[client.Object](gateways, &corev1.Pod{}, all)).
+		WatchesRawSource(source.Channel(probes, all)).
+		WatchesRawSource(source.Channel(a.wake, all)).
+		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
+		Complete(a)
+	if err != nil {
+		return fmt.Errorf("set up agent: %w", err)
+	}
+	return nil
+}
+
+// Reconcile computes and applies the node's data path.
+func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+	s, pools, err := a.snapshot(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	d, problems := agent.Compute(s, a.Marks)
+	a.report(problems)
+	problemCount.Set(float64(len(problems)))
+	gatewaysDown.Set(float64(len(s.Down)))
+
+	st, err := a.Dataplane.Apply(&d)
+	if err != nil {
+		applyFailures.Inc()
+		a.setCondition(ctx, s.Self, d.Gateway, corev1.ConditionFalse, "ApplyFailed", err.Error())
+		return reconcile.Result{}, fmt.Errorf("apply data path: %w", err)
+	}
+	a.ready.Store(true)
+	a.Prober.Update(a.targets(s, &d, pools))
+	a.serve(d.Gateway, st)
+
+	status, reason, msg := a.gatewayCondition(d.Gateway, st)
+	a.setCondition(ctx, s.Self, d.Gateway, status, reason, msg)
+	return reconcile.Result{RequeueAfter: a.Resync}, nil
+}
+
+// Close stops probing, answering probes and self-testing. The kernel state
+// stays: traffic keeps flowing while the agent restarts.
+func (a *Agent) Close() {
+	a.Prober.Stop()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.responder != nil {
+		_ = a.responder.Close()
+		a.responder = nil
+	}
+	a.stopSelfTest()
+}
+
+func (a *Agent) snapshot(ctx context.Context) (*agent.Snapshot, []v1.EgressPool, error) {
+	s := &agent.Snapshot{Excluded: a.Excluded, Down: a.Prober.Down(), Node: &corev1.Node{}}
+	if err := a.Client.Get(ctx, client.ObjectKey{Name: a.Node}, s.Node); err != nil {
+		return nil, nil, fmt.Errorf("read node %s: %w", a.Node, err)
+	}
+	self := &corev1.Pod{}
+	switch err := a.Client.Get(ctx, client.ObjectKey{Namespace: a.Namespace, Name: a.Pod}, self); {
+	case err == nil:
+		s.Self = self
+	case !apierrors.IsNotFound(err):
+		return nil, nil, fmt.Errorf("read own pod: %w", err)
+	}
+
+	var (
+		nodes    corev1.NodeList
+		pods     corev1.PodList
+		nss      corev1.NamespaceList
+		pols     v1.EgressPolicyList
+		cpols    v1.ClusterEgressPolicyList
+		pools    v1.EgressPoolList
+		gateways corev1.PodList
+	)
+	for _, l := range []struct {
+		list client.ObjectList
+		what string
+	}{{&nodes, "nodes"}, {&pods, "pods"}, {&nss, "namespaces"}, {&pols, "egress policies"}, {&cpols, "cluster egress policies"}, {&pools, "egress pools"}} {
+		if err := a.Client.List(ctx, l.list); err != nil {
+			return nil, nil, fmt.Errorf("list %s: %w", l.what, err)
+		}
+	}
+	if err := a.Gateways.List(ctx, &gateways, client.InNamespace(a.Namespace), client.MatchingLabels{v1.LabelGateway: "true"}); err != nil {
+		return nil, nil, fmt.Errorf("list gateways: %w", err)
+	}
+	s.Nodes = nodes.Items
+	for i := range pods.Items {
+		if pods.Items[i].Spec.NodeName == a.Node {
+			s.Pods = append(s.Pods, pods.Items[i])
+		}
+	}
+	for i := range gateways.Items {
+		if a.AgentSelector.Matches(labels.Set(gateways.Items[i].Labels)) {
+			s.Gateways = append(s.Gateways, gateways.Items[i])
+		}
+	}
+	if s.Self != nil && !a.AgentSelector.Matches(labels.Set(s.Self.Labels)) {
+		return nil, nil, fmt.Errorf("own pod %s/%s does not match the agent selector %s", a.Namespace, a.Pod, a.AgentSelector)
+	}
+	s.Namespaces = nss.Items
+	s.Policies = pols.Items
+	s.ClusterPolicies = cpols.Items
+	return s, pools.Items, nil
+}
+
+// targets probes every gateway with a mark, draining ones too: their
+// established flows are flushed if they fail.
+func (a *Agent) targets(s *agent.Snapshot, d *agent.Desired, pools []v1.EgressPool) map[netip.Addr]agent.ProbeTarget {
+	byName := map[string]*v1.EgressPool{}
+	for i := range pools {
+		byName[pools[i].Name] = &pools[i]
+	}
+	ipOf := map[string]netip.Addr{}
+	for i := range s.Nodes {
+		if ip, ok := agent.NodeIP(&s.Nodes[i]); ok {
+			ipOf[s.Nodes[i].Name] = ip
+		}
+	}
+	poolOf := map[netip.Addr]string{}
+	for i := range s.Gateways {
+		if ip, ok := ipOf[s.Gateways[i].Spec.NodeName]; ok {
+			poolOf[ip] = s.Gateways[i].Labels[v1.LabelPool]
+		}
+	}
+	out := map[netip.Addr]agent.ProbeTarget{}
+	for mark, ip := range d.Gateways {
+		t := agent.ProbeTarget{Mark: mark, Interval: defaultProbeInterval, Threshold: defaultProbeThreshold}
+		if p := byName[poolOf[ip]]; p != nil {
+			if p.Spec.Probe.IntervalMilliseconds > 0 {
+				t.Interval = time.Duration(p.Spec.Probe.IntervalMilliseconds) * time.Millisecond
+			}
+			if p.Spec.Probe.FailureThreshold > 0 {
+				t.Threshold = int(p.Spec.Probe.FailureThreshold)
+			}
+		}
+		out[ip] = t
+	}
+	return out
+}
+
+// serve answers probes while the slot carries traffic, and self-tests it.
+func (a *Agent) serve(role *agent.GatewayRole, st dataplane.Status) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if role == nil {
+		if a.responder != nil {
+			_ = a.responder.Close()
+			a.responder = nil
+		}
+		a.stopSelfTest()
+		return
+	}
+	if a.responder == nil {
+		conn, err := a.Dataplane.ListenProbe(context.Background())
+		if err != nil {
+			a.Log.Error(err, "cannot answer probes; source nodes will treat this gateway as down")
+		} else {
+			a.responder = agent.NewResponder(conn)
+		}
+	}
+	if a.responder != nil {
+		a.responder.SetServing(st.Serving)
+	}
+	if st.Serving {
+		a.startSelfTest(role)
+	} else {
+		a.stopSelfTest()
+	}
+	if st.Serving {
+		gatewayServing.Set(1)
+	} else {
+		gatewayServing.Set(0)
+	}
+}
+
+// gatewayCondition is the readiness the agent reports for its slot.
+func (a *Agent) gatewayCondition(role *agent.GatewayRole, st dataplane.Status) (corev1.ConditionStatus, string, string) {
+	if role == nil {
+		return corev1.ConditionFalse, "NotAssigned", "this node serves no slot"
+	}
+	if !st.Serving {
+		return corev1.ConditionFalse, "NotServing", st.Reason
+	}
+	a.mu.Lock()
+	passed, failures, err := a.test.passed, a.test.failures, a.test.err
+	a.mu.Unlock()
+	switch {
+	case failures >= selfTestFailures || (!passed && err != nil):
+		return corev1.ConditionFalse, "SelfTestFailed", err.Error()
+	case !passed:
+		return corev1.ConditionFalse, "SelfTestPending", "waiting for the first self-test through the slot"
+	case role.Draining:
+		return corev1.ConditionFalse, "Draining", "established flows continue; new flows go to other gateways"
+	}
+	return corev1.ConditionTrue, "Serving", v1.GatewayReadyMessage(role.SlotID)
+}
+
+// setCondition patches the gateway readiness condition when it changes.
+// Agents that never served a slot leave their pod alone.
+func (a *Agent) setCondition(ctx context.Context, self *corev1.Pod, role *agent.GatewayRole, status corev1.ConditionStatus, reason, msg string) {
+	if self == nil {
+		return
+	}
+	var cur *corev1.PodCondition
+	for i := range self.Status.Conditions {
+		if self.Status.Conditions[i].Type == v1.ConditionGatewayReady {
+			cur = &self.Status.Conditions[i]
+		}
+	}
+	if cur == nil && role == nil {
+		return
+	}
+	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == msg {
+		return
+	}
+	want := corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.Now()}
+	if cur != nil && cur.Status == status {
+		want.LastTransitionTime = cur.LastTransitionTime
+	}
+	raw, err := json.Marshal(map[string]any{"status": map[string]any{"conditions": []corev1.PodCondition{want}}})
+	if err != nil {
+		a.Log.Error(err, "encode readiness")
+		return
+	}
+	if err := a.Client.Status().Patch(ctx, self, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
+		a.Log.Error(err, "report gateway readiness", "ready", status, "reason", reason)
+		return
+	}
+	a.Log.Info("gateway readiness", "ready", status, "reason", reason, "message", msg)
+}
+
+// startSelfTest tests the slot now and every interval, until the slot or
+// its public IP changes. Called with a.mu held.
+func (a *Agent) startSelfTest(role *agent.GatewayRole) {
+	key := role.SlotID + "/" + role.Public.String()
+	if a.test.key == key {
+		return
+	}
+	a.stopSelfTest()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.test = selfTest{key: key, cancel: cancel, done: make(chan struct{})}
+	go a.selfTestLoop(ctx, key, role.Public, a.test.done)
+}
+
+// stopSelfTest is called with a.mu held.
+func (a *Agent) stopSelfTest() {
+	if a.test.cancel == nil {
+		return
+	}
+	a.test.cancel()
+	done := a.test.done
+	a.test = selfTest{}
+	a.mu.Unlock()
+	<-done
+	a.mu.Lock()
+}
+
+func (a *Agent) selfTestLoop(ctx context.Context, key string, public netip.Addr, done chan struct{}) {
+	defer close(done)
+	tick := time.NewTicker(a.SelfTestInterval)
+	defer tick.Stop()
+	for {
+		tctx, cancel := context.WithTimeout(ctx, selfTestTimeout)
+		err := a.SelfTest(tctx, a.Dataplane.DialGateway, a.SelfTestURL, public)
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		a.mu.Lock()
+		if a.test.key != key {
+			a.mu.Unlock()
+			return
+		}
+		before := a.test.passed && a.test.failures < selfTestFailures
+		if err == nil {
+			a.test.passed, a.test.failures, a.test.err = true, 0, nil
+		} else {
+			selfTestFailuresTotal.Inc()
+			a.test.failures++
+			a.test.err = err
+			a.Log.Error(err, "self-test through the slot failed", "consecutive", a.test.failures)
+		}
+		after := a.test.passed && a.test.failures < selfTestFailures
+		first := a.test.failures == 1 && !a.test.passed
+		a.mu.Unlock()
+		if before != after || first {
+			select {
+			case a.wake <- event.GenericEvent{Object: &corev1.Node{}}:
+			default:
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// report logs the problems when they change.
+func (a *Agent) report(problems []string) {
+	slices.Sort(problems)
+	joined := strings.Join(problems, "\n")
+	a.mu.Lock()
+	changed := joined != a.problems
+	a.problems = joined
+	a.mu.Unlock()
+	if changed {
+		for _, p := range problems {
+			a.Log.Info("problem", "detail", p)
+		}
+	}
+}

@@ -34,7 +34,8 @@ const (
 	LabelGateway = Group + "/gateway"
 	// LabelPool is set by the controller on the agent pod of a gateway node.
 	LabelPool = Group + "/pool"
-	// ConditionGatewayReady is the pod readiness gate a gateway agent sets.
+	// ConditionGatewayReady is the pod condition a gateway agent sets once its
+	// slot carries traffic and its self-test passes. GatewayReady reads it.
 	ConditionGatewayReady corev1.PodConditionType = Group + "/gateway-ready"
 )
 

@@ -278,17 +278,15 @@ func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods [
 func agentOf(p *corev1.Pod) *Agent {
 	a := &Agent{Pod: p.Name}
 	for _, c := range p.Status.Conditions {
-		switch c.Type {
-		case corev1.ContainersReady:
+		if c.Type == corev1.ContainersReady {
 			a.Ready = c.Status == corev1.ConditionTrue
-		case v1.ConditionGatewayReady:
-			a.GatewayReady = c.Status == corev1.ConditionTrue
 		}
 	}
 	if raw := p.Annotations[v1.AnnotationGateway]; raw != "" {
 		var g v1.Gateway
 		if json.Unmarshal([]byte(raw), &g) == nil {
 			a.Gateway = &g
+			a.GatewayReady = v1.GatewayReady(p, g.SlotID)
 		}
 	}
 	if raw := p.Annotations[v1.AnnotationDrainStarted]; raw != "" {

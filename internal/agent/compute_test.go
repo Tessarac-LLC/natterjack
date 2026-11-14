@@ -1,0 +1,299 @@
+/*
+Copyright 2026 Tessarac, LLC.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package agent
+
+import (
+	"encoding/json"
+	"net/netip"
+	"slices"
+	"strings"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
+)
+
+var ip = netip.MustParseAddr
+
+func node(name, zone, addr string) corev1.Node {
+	return corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{corev1.LabelTopologyZone: zone}},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: addr}}},
+	}
+}
+
+// gatewayPod is a gateway of the "web" pool.
+func gatewayPod(nodeName string, ready bool) corev1.Pod {
+	st := corev1.ConditionFalse
+	if ready {
+		st = corev1.ConditionTrue
+	}
+	slot := "eni-" + nodeName
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "agent-" + nodeName,
+			Labels:      map[string]string{v1.LabelGateway: "true", v1.LabelPool: "web"},
+			Annotations: map[string]string{v1.AnnotationGateway: `{"pool":"web","slotID":"` + slot + `"}`},
+		},
+		Spec: corev1.PodSpec{NodeName: nodeName},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			{Type: v1.ConditionGatewayReady, Status: st, Message: v1.GatewayReadyMessage(slot)},
+		}},
+	}
+}
+
+func pod(ns, name, addr string, lbls map[string]string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, Labels: lbls},
+		Spec:       corev1.PodSpec{ServiceAccountName: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning, PodIPs: []corev1.PodIP{{IP: addr}, {IP: "fd00::1"}}},
+	}
+}
+
+func cluster() *Snapshot {
+	nodes := []corev1.Node{
+		node("a1", "zone-a", "10.0.1.10"), node("a2", "zone-a", "10.0.1.11"),
+		node("b1", "zone-b", "10.0.2.10"), node("src", "zone-a", "10.0.1.50"),
+	}
+	return &Snapshot{
+		Node: &nodes[3], Nodes: nodes, Excluded: DefaultExcluded,
+		Gateways: []corev1.Pod{gatewayPod("a1", true), gatewayPod("a2", true), gatewayPod("b1", true)},
+	}
+}
+
+func mustMarks(t *testing.T) *Marks {
+	t.Helper()
+	m, err := NewMarks(0x00ff0000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func ringGateways(d Desired, pool string) []netip.Addr {
+	var out []netip.Addr
+	for _, m := range d.Rings[pool] {
+		out = append(out, d.Gateways[m])
+	}
+	slices.SortFunc(out, func(a, b netip.Addr) int { return a.Compare(b) })
+	return slices.Compact(out)
+}
+
+func TestRingPrefersOwnZone(t *testing.T) {
+	d, problems := Compute(cluster(), mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.1.10"), ip("10.0.1.11")}) {
+		t.Fatalf("ring uses %v; want only zone-a gateways", got)
+	}
+	if len(d.Gateways) != 3 {
+		t.Fatalf("every gateway needs a mark so its flows survive: %v", d.Gateways)
+	}
+	if d.NodeIP != ip("10.0.1.50") || len(d.Nodes) != 4 {
+		t.Fatalf("node %v nodes %v", d.NodeIP, d.Nodes)
+	}
+}
+
+func TestRingFallsBackAcrossZones(t *testing.T) {
+	s := cluster()
+	s.Down = map[netip.Addr]bool{ip("10.0.1.10"): true}
+	s.Gateways[1].Annotations[v1.AnnotationDrainStarted] = "2026-11-14T00:00:00Z"
+	d, _ := Compute(s, mustMarks(t))
+	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.2.10")}) {
+		t.Fatalf("ring uses %v; want the other zone when this zone has no live gateway", got)
+	}
+	if len(d.Gateways) != 3 {
+		t.Fatal("down and draining gateways keep their marks")
+	}
+	if len(d.Failed) != 1 || d.Gateways[d.Failed[0]] != ip("10.0.1.10") {
+		t.Fatalf("failed marks %v; want only the down gateway's, not the draining one's", d.Failed)
+	}
+}
+
+func TestNoLiveGatewayMeansNoRing(t *testing.T) {
+	s := cluster()
+	for i := range s.Gateways {
+		s.Gateways[i].Status.Conditions[1].Status = corev1.ConditionFalse
+	}
+	// A condition left from the agent's previous slot vouches for nothing.
+	s.Gateways[0].Status.Conditions[1] = corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: corev1.ConditionTrue, Message: v1.GatewayReadyMessage("eni-old")}
+	d, _ := Compute(s, mustMarks(t))
+	if _, ok := d.Rings["web"]; ok {
+		t.Fatal("a pool with no ready gateway must have no ring")
+	}
+}
+
+func TestMarksAreStable(t *testing.T) {
+	m := mustMarks(t)
+	s := cluster()
+	d1, _ := Compute(s, m)
+	s.Gateways = s.Gateways[1:]
+	d2, _ := Compute(s, m)
+	for mark, addr := range d2.Gateways {
+		if d1.Gateways[mark] != addr {
+			t.Fatalf("mark %#x moved from %v to %v", mark, d1.Gateways[mark], addr)
+		}
+	}
+	if len(d2.Gateways) != 2 {
+		t.Fatal("a removed gateway must release its mark")
+	}
+}
+
+func TestMarksRestoreAndCapacity(t *testing.T) {
+	m, err := NewMarks(0x000f0000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Restore(map[uint32]netip.Addr{0x00070000: ip("10.0.0.7"), 0x01000000: ip("10.0.0.8")})
+	var want []netip.Addr
+	for i := range 20 {
+		want = append(want, netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}))
+	}
+	got, full := m.Assign(want)
+	if got[0x00070000] != ip("10.0.0.7") {
+		t.Fatal("a restored mark must be kept")
+	}
+	if len(got) != 15 || len(full) != 5 {
+		t.Fatalf("a 4-bit mask holds 15 gateways: got %d, %d left out", len(got), len(full))
+	}
+	for mark := range got {
+		if mark&^0x000f0000 != 0 || mark == 0 {
+			t.Fatalf("mark %#x outside the mask", mark)
+		}
+	}
+}
+
+func TestNewMarksRejectsBadMasks(t *testing.T) {
+	for _, mask := range []uint32{0, 0x0f0f0000, 0x00070000} {
+		if _, err := NewMarks(mask); err == nil {
+			t.Errorf("mask %#x accepted", mask)
+		}
+	}
+}
+
+func TestRingIsEvenAndMovesLittle(t *testing.T) {
+	g := map[netip.Addr]uint32{ip("10.0.0.1"): 1, ip("10.0.0.2"): 2, ip("10.0.0.3"): 3, ip("10.0.0.4"): 4}
+	r1 := Ring(g)
+	count := map[uint32]int{}
+	for _, m := range r1 {
+		count[m]++
+	}
+	for m, c := range count {
+		if c < 6 || c > 26 {
+			t.Errorf("gateway %d holds %d of %d buckets", m, c, Buckets)
+		}
+	}
+	delete(g, ip("10.0.0.4"))
+	r2 := Ring(g)
+	for b := range r1 {
+		if r1[b] != 4 && r1[b] != r2[b] {
+			t.Fatalf("bucket %d moved from %d to %d though its gateway stayed", b, r1[b], r2[b])
+		}
+	}
+}
+
+func TestPolicySelection(t *testing.T) {
+	s := cluster()
+	s.Namespaces = []corev1.Namespace{
+		{ObjectMeta: metav1.ObjectMeta{Name: "shop", Labels: map[string]string{"egress": "yes"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "batch"}},
+	}
+	s.Pods = []corev1.Pod{
+		pod("shop", "web", "192.168.0.1", map[string]string{"app": "web"}),
+		pod("shop", "db", "192.168.0.2", map[string]string{"app": "db"}),
+		pod("batch", "job", "192.168.0.3", nil),
+	}
+	hostNet := pod("shop", "host", "10.0.1.50", map[string]string{"app": "web"})
+	hostNet.Spec.HostNetwork = true
+	done := pod("shop", "done", "192.168.0.4", map[string]string{"app": "web"})
+	done.Status.Phase = corev1.PodSucceeded
+	other := pod("shop", "robot", "192.168.0.5", map[string]string{"app": "web"})
+	other.Spec.ServiceAccountName = "robot"
+	s.Pods = append(s.Pods, hostNet, done, other)
+	s.Policies = []v1.EgressPolicy{{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "web"},
+		Spec: v1.EgressPolicySpec{
+			PoolName: "web", PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+			ServiceAccountNames: []string{"default"}, ExcludedCIDRs: []string{"198.51.100.0/24"},
+		},
+	}}
+	s.ClusterPolicies = []v1.ClusterEgressPolicy{
+		{ObjectMeta: metav1.ObjectMeta{Name: "labeled"}, Spec: v1.ClusterEgressPolicySpec{PoolName: "web", NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"egress": "yes"}}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "nodes"}, Spec: v1.ClusterEgressPolicySpec{PoolName: "web", NodeTraffic: true}},
+	}
+	d, problems := Compute(s, mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	got := map[string]Steer{}
+	for _, st := range d.Steers {
+		got[st.Name] = st
+	}
+	if src := got["ns/shop/web"].Sources; !slices.Equal(src, []netip.Addr{ip("192.168.0.1")}) {
+		t.Errorf("EgressPolicy selects %v; want only the running, non-host-network web pod running as default", src)
+	}
+	if ex := got["ns/shop/web"].Excluded; len(ex) != 1 || ex[0].String() != "198.51.100.0/24" {
+		t.Errorf("excluded %v", ex)
+	}
+	if src := got["cluster/labeled"].Sources; len(src) != 3 {
+		t.Errorf("ClusterEgressPolicy selects %v; want every live pod in labeled namespaces", src)
+	}
+	if st := got["cluster/nodes"]; !st.Node || len(st.Sources) != 0 {
+		t.Errorf("an unset namespace selector selects no pods, only node traffic: %+v", st)
+	}
+}
+
+func gatewayAnnotation(t *testing.T, g v1.Gateway) string {
+	t.Helper()
+	raw, err := json.Marshal(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+func TestGatewayRole(t *testing.T) {
+	s := cluster()
+	self := gatewayPod("src", false)
+	self.Annotations = map[string]string{v1.AnnotationGateway: gatewayAnnotation(t, v1.Gateway{
+		Pool: "web", SlotID: "eni-1", MAC: "02:AA:00:00:00:01", PrivateIP: "10.0.9.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9",
+	})}
+	s.Self = &self
+	d, problems := Compute(s, mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	want := GatewayRole{Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9")}
+	if d.Gateway == nil || *d.Gateway != want {
+		t.Fatalf("role %+v", d.Gateway)
+	}
+
+	self.Annotations[v1.AnnotationGateway] = gatewayAnnotation(t, v1.Gateway{Pool: "web", SlotID: "eni-1", PrivateIP: "10.0.8.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9"})
+	d, problems = Compute(s, mustMarks(t))
+	if d.Gateway != nil || len(problems) != 1 || !strings.Contains(problems[0], "inconsistent") {
+		t.Fatalf("an address outside its subnet must be refused: %+v %v", d.Gateway, problems)
+	}
+
+	delete(self.Labels, v1.LabelGateway)
+	if d, _ = Compute(s, mustMarks(t)); d.Gateway != nil {
+		t.Fatal("without the gateway label the node is not a gateway")
+	}
+}
