@@ -1,0 +1,10 @@
+config:
+  default: true
+  MD013: false        # line length: prose wraps naturally, tables and URLs run long
+  MD033:
+    allowed_elements: [br, details, summary, img, a, p, i]
+  MD041: false        # site pages start with front matter, not a heading
+ignores:
+  - site/node_modules/**
+  - site/public/**
+  - site/resources/**

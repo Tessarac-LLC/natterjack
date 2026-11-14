@@ -1,0 +1,18 @@
+{
+  "name": "natterjack-site",
+  "private": true,
+  "description": "Build dependencies for the natterjack.io website (Hugo + Docsy).",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "hugo --gc --minify",
+    "serve": "hugo server"
+  },
+  "devDependencies": {
+    "@fortawesome/fontawesome-free": "7.3.1",
+    "autoprefixer": "10.6.2",
+    "bootstrap": "5.3.8",
+    "postcss": "8.5.33",
+    "postcss-cli": "12.0.0",
+    "sass-embedded": "1.108.2"
+  }
+}

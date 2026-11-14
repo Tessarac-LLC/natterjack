@@ -1,0 +1,4 @@
+# Every path is owned by the maintainers team. The "main: maintainer review"
+# ruleset requires an approving review from a code owner, so nothing merges
+# into main without a maintainer's approval.
+*       @Tessarac-LLC/natterjack-maintainers
