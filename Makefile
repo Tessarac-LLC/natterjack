@@ -35,6 +35,10 @@ test: $(SETUP_ENVTEST) ## Unit and envtest suites with the race detector
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION) --bin-dir $(BIN)/k8s)" \
 		go test -race -count=1 -coverprofile=cover.out ./...
 
+.PHONY: test-privileged
+test-privileged: ## Data path tests in throwaway privileged containers (needs Docker)
+	./hack/test-privileged.sh
+
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Known vulnerabilities reachable from our code
 	$(GOVULNCHECK) ./...

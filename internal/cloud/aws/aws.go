@@ -49,6 +49,7 @@ type EC2 interface {
 	DescribeSecurityGroups(context.Context, *ec2.DescribeSecurityGroupsInput, ...func(*ec2.Options)) (*ec2.DescribeSecurityGroupsOutput, error)
 	DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesInput, ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
 	DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
+	DescribeSubnets(context.Context, *ec2.DescribeSubnetsInput, ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
 	AttachNetworkInterface(context.Context, *ec2.AttachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.AttachNetworkInterfaceOutput, error)
 	DetachNetworkInterface(context.Context, *ec2.DetachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.DetachNetworkInterfaceOutput, error)
 }
@@ -114,6 +115,10 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 	if err != nil {
 		return nil, err
 	}
+	cidrs, err := p.subnetCIDRs(ctx, enis)
+	if err != nil {
+		return nil, err
+	}
 
 	slots := make([]cloud.Slot, 0, len(enis))
 	for i := range enis {
@@ -124,6 +129,7 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 			PrivateIP:   aws.ToString(e.PrivateIpAddress),
 			MAC:         aws.ToString(e.MacAddress),
 			SubnetID:    aws.ToString(e.SubnetId),
+			SubnetCIDR:  cidrs[aws.ToString(e.SubnetId)],
 			RouteTarget: routeTargets[aws.ToString(e.NetworkInterfaceId)],
 			Tags:        make(map[string]string, len(e.TagSet)),
 		}
@@ -137,7 +143,7 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 			s.Instance = aws.ToString(e.Attachment.InstanceId)
 			s.InstanceInCluster = inCluster[s.Instance]
 		}
-		s.Problems = problems(e, ins, igw)
+		s.Problems = problems(e, ins, igw, cidrs)
 		slots = append(slots, s)
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i].ID < slots[j].ID })
@@ -145,7 +151,7 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 }
 
 // problems returns every failed safety check for an ENI (design section 7.4).
-func problems(e *types.NetworkInterface, inbound map[string]bool, igw map[string]bool) []string {
+func problems(e *types.NetworkInterface, inbound, igw map[string]bool, cidrs map[string]string) []string {
 	var out []string
 	if e.InterfaceType != "" && e.InterfaceType != types.NetworkInterfaceTypeInterface {
 		out = append(out, fmt.Sprintf("interface type is %q; only a plain ENI can be a slot", e.InterfaceType))
@@ -169,6 +175,9 @@ func problems(e *types.NetworkInterface, inbound map[string]bool, igw map[string
 		if inbound[aws.ToString(g.GroupId)] {
 			out = append(out, fmt.Sprintf("security group %s allows inbound traffic; a slot's security groups must have no inbound rules", aws.ToString(g.GroupId)))
 		}
+	}
+	if cidrs[aws.ToString(e.SubnetId)] == "" {
+		out = append(out, fmt.Sprintf("subnet %s has no IPv4 CIDR block", aws.ToString(e.SubnetId)))
 	}
 	if !igw[aws.ToString(e.SubnetId)] {
 		out = append(out, fmt.Sprintf("subnet %s has no 0.0.0.0/0 route to an internet gateway", aws.ToString(e.SubnetId)))
@@ -484,6 +493,26 @@ func isNotFound(err error) bool {
 		return false
 	}
 	return strings.HasSuffix(api.ErrorCode(), ".NotFound") || api.ErrorCode() == "InvalidAttachmentID.NotFound"
+}
+
+// subnetCIDRs maps each slot's subnet to its IPv4 CIDR block.
+func (p *Provider) subnetCIDRs(ctx context.Context, enis []types.NetworkInterface) (map[string]string, error) {
+	var ids []string
+	for i := range enis {
+		ids = append(ids, aws.ToString(enis[i].SubnetId))
+	}
+	out := map[string]string{}
+	pager := ec2.NewDescribeSubnetsPaginator(p.ec2, &ec2.DescribeSubnetsInput{SubnetIds: unique(ids)})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe subnets: %w", err)
+		}
+		for _, sn := range page.Subnets {
+			out[aws.ToString(sn.SubnetId)] = aws.ToString(sn.CidrBlock)
+		}
+	}
+	return out, nil
 }
 
 func unique(in []string) []string {

@@ -104,6 +104,19 @@ func (f *fakeEC2) DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesI
 	return &ec2.DescribeRouteTablesOutput{RouteTables: f.tables}, nil
 }
 
+// DescribeSubnets gives every subnet a /24, except IPv6-only ones.
+func (f *fakeEC2) DescribeSubnets(_ context.Context, in *ec2.DescribeSubnetsInput, _ ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error) {
+	out := &ec2.DescribeSubnetsOutput{}
+	for _, id := range in.SubnetIds {
+		sn := types.Subnet{SubnetId: aws.String(id)}
+		if !strings.Contains(id, "ipv6only") {
+			sn.CidrBlock = aws.String("10.0.1.0/24")
+		}
+		out.Subnets = append(out.Subnets, sn)
+	}
+	return out, nil
+}
+
 func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
 	r := types.Reservation{}
 	for _, id := range in.InstanceIds {
@@ -270,7 +283,7 @@ func TestHealthySlot(t *testing.T) {
 	if !s.Usable() {
 		t.Fatalf("problems on a correct slot: %v", s.Problems)
 	}
-	if s.PublicIP != "203.0.113.10" || s.Zone != "us-east-2a" || s.MAC == "" || !s.RouteTarget {
+	if s.PublicIP != "203.0.113.10" || s.Zone != "us-east-2a" || s.MAC == "" || !s.RouteTarget || s.SubnetCIDR != "10.0.1.0/24" {
 		t.Fatalf("slot fields not reported: %+v", s)
 	}
 }
@@ -293,6 +306,7 @@ func TestSafetyChecks(t *testing.T) {
 		}, "sg-missing allows inbound"},
 		{"no group", func(e *types.NetworkInterface) { e.Groups = nil }, "no security group"},
 		{"private subnet", func(e *types.NetworkInterface) { e.SubnetId = aws.String("subnet-private-us-east-2a") }, "no 0.0.0.0/0 route to an internet gateway"},
+		{"ipv6-only subnet", func(e *types.NetworkInterface) { e.SubnetId = aws.String("subnet-ipv6only") }, "has no IPv4 CIDR block"},
 		{"main table without igw", func(e *types.NetworkInterface) { e.SubnetId = aws.String("subnet-unassociated") }, "no 0.0.0.0/0 route to an internet gateway"},
 		{"service managed", func(e *types.NetworkInterface) { e.RequesterManaged = aws.Bool(true) }, "managed by an AWS service"},
 		{"load balancer interface", func(e *types.NetworkInterface) { e.InterfaceType = types.NetworkInterfaceTypeNetworkLoadBalancer }, "only a plain ENI"},

@@ -212,23 +212,26 @@ func (h *harness) pod(name string) *corev1.Pod {
 	return p
 }
 
-func (h *harness) pool(name string) *v1.EgressPool {
+// pool is the "lifecycle" pool.
+func (h *harness) pool() *v1.EgressPool {
 	h.t.Helper()
 	p := &v1.EgressPool{}
-	if err := k8s.Get(h.ctx, client.ObjectKey{Name: name}, p); err != nil {
+	if err := k8s.Get(h.ctx, client.ObjectKey{Name: "lifecycle"}, p); err != nil {
 		h.t.Fatal(err)
 	}
 	return p
 }
 
-func (h *harness) slotState(pool, id string) v1.SlotStatus {
+// slotState is the status of slot eni-1 of the "lifecycle" pool.
+func (h *harness) slotState() v1.SlotStatus {
 	h.t.Helper()
-	for _, s := range h.pool(pool).Status.Slots {
+	const id = "eni-1"
+	for _, s := range h.pool().Status.Slots {
 		if s.ID == id {
 			return s
 		}
 	}
-	h.t.Fatalf("slot %s missing from pool %s", id, pool)
+	h.t.Fatalf("slot %s missing from the lifecycle pool", id)
 	return v1.SlotStatus{}
 }
 
@@ -239,12 +242,12 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 	h.node("lc-2", "us-east-2a")
 	h.agent("lifecycle", "lc-1")
 	h.agent("lifecycle", "lc-2")
-	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", Tags: map[string]string{}}
+	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", Tags: map[string]string{}}
 
 	// Attach to the first node; the agent pod carries the assignment.
 	h.reconcile()
 	if h.cloud.instanceOf("eni-1") != "i-lc-1" {
-		t.Fatalf("attached to %q; pool status %+v", h.cloud.instanceOf("eni-1"), h.pool("lifecycle").Status)
+		t.Fatalf("attached to %q; pool status %+v", h.cloud.instanceOf("eni-1"), h.pool().Status)
 	}
 	p := h.pod("agent-lc-1")
 	var g v1.Gateway
@@ -252,26 +255,36 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Labels[v1.LabelGateway] != "true" || p.Labels[v1.LabelPool] != "lifecycle" ||
-		g != (v1.Gateway{Pool: "lifecycle", SlotID: "eni-1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", PublicIP: "203.0.113.1", Tunnel: v1.TunnelGeneve}) {
+		g != (v1.Gateway{Pool: "lifecycle", SlotID: "eni-1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", PublicIP: "203.0.113.1", Tunnel: v1.TunnelGeneve}) {
 		t.Fatalf("agent contract not written: labels %v gateway %+v", p.Labels, g)
 	}
-	if s := h.slotState("lifecycle", "eni-1"); s.State != v1.SlotAttaching || s.Node != "lc-1" {
+	if s := h.slotState(); s.State != v1.SlotAttaching || s.Node != "lc-1" {
 		t.Fatalf("status %+v", s)
 	}
-	if st := h.pool("lifecycle").Status; !meta.IsStatusConditionFalse(st.Conditions, v1.ConditionReady) || len(st.PublicIPs) != 1 {
+	if st := h.pool().Status; !meta.IsStatusConditionFalse(st.Conditions, v1.ConditionReady) || len(st.PublicIPs) != 1 {
 		t.Fatalf("pool status %+v", st)
 	}
 
-	// The agent reports ready.
-	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: corev1.ConditionTrue})
+	// A ready condition left from another slot does not count.
+	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: corev1.ConditionTrue, Message: v1.GatewayReadyMessage("eni-old")})
 	if err := k8s.Status().Update(h.ctx, p); err != nil {
 		t.Fatal(err)
 	}
 	h.reconcile()
-	if s := h.slotState("lifecycle", "eni-1"); s.State != v1.SlotActive {
+	if s := h.slotState(); s.State != v1.SlotAttaching {
+		t.Fatalf("a stale ready condition activated the slot: %+v", s)
+	}
+
+	// The agent reports ready.
+	p.Status.Conditions[len(p.Status.Conditions)-1].Message = v1.GatewayReadyMessage("eni-1")
+	if err := k8s.Status().Update(h.ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile()
+	if s := h.slotState(); s.State != v1.SlotActive {
 		t.Fatalf("status %+v", s)
 	}
-	if !meta.IsStatusConditionTrue(h.pool("lifecycle").Status.Conditions, v1.ConditionReady) {
+	if !meta.IsStatusConditionTrue(h.pool().Status.Conditions, v1.ConditionReady) {
 		t.Fatal("pool not ready")
 	}
 
@@ -288,7 +301,7 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 	if h.pod("agent-lc-1").Annotations[v1.AnnotationDrainStarted] == "" || h.cloud.instanceOf("eni-1") != "i-lc-1" {
 		t.Fatal("drain not started, or slot moved before the window")
 	}
-	if s := h.slotState("lifecycle", "eni-1"); s.State != v1.SlotDraining || !strings.Contains(s.Reason, "cordoned") {
+	if s := h.slotState(); s.State != v1.SlotDraining || !strings.Contains(s.Reason, "cordoned") {
 		t.Fatalf("status %+v", s)
 	}
 

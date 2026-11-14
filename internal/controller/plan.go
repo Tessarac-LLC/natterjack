@@ -385,7 +385,7 @@ func (pp *planner) gateway(s cloud.Slot) v1.Gateway {
 	if tunnel == "" {
 		tunnel = v1.TunnelGeneve
 	}
-	return v1.Gateway{Pool: pp.pool.Name, SlotID: s.ID, MAC: s.MAC, PrivateIP: s.PrivateIP, PublicIP: s.PublicIP, Tunnel: tunnel}
+	return v1.Gateway{Pool: pp.pool.Name, SlotID: s.ID, MAC: s.MAC, PrivateIP: s.PrivateIP, SubnetCIDR: s.SubnetCIDR, PublicIP: s.PublicIP, Tunnel: tunnel}
 }
 
 // choose picks the node for a free slot: an eligible node in the slot's zone

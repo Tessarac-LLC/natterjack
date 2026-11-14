@@ -16,9 +16,11 @@ limitations under the License.
 
 package v1alpha1
 
+import corev1 "k8s.io/api/core/v1"
+
 // The controller tells an agent it is a gateway through its own pod: the
-// LabelGateway and LabelPool labels select it into the gateway Service, and
-// these annotations carry the assignment. The agent holds no cloud
+// LabelGateway and LabelPool labels let every agent find it by watching
+// pods, and these annotations carry the assignment. The agent holds no cloud
 // credentials and acts only on what the controller writes here.
 const (
 	// AnnotationGateway holds the JSON-encoded Gateway assignment.
@@ -38,8 +40,26 @@ type Gateway struct {
 	MAC string `json:"mac"`
 	// PrivateIP of the slot inside the VPC.
 	PrivateIP string `json:"privateIP"`
+	// SubnetCIDR of the slot's subnet. The agent addresses the slot with its
+	// prefix length and routes through the subnet's router.
+	SubnetCIDR string `json:"subnetCIDR"`
 	// PublicIP traffic leaves from.
 	PublicIP string `json:"publicIP"`
 	// Tunnel between source nodes and this gateway.
 	Tunnel TunnelType `json:"tunnel"`
+}
+
+// GatewayReadyMessage is the message of a true ConditionGatewayReady. It
+// names the slot, so a condition left over from an earlier assignment never
+// vouches for a new one.
+func GatewayReadyMessage(slotID string) string { return "serving slot " + slotID }
+
+// GatewayReady reports whether the pod's agent says it serves slotID.
+func GatewayReady(p *corev1.Pod, slotID string) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == ConditionGatewayReady {
+			return c.Status == corev1.ConditionTrue && c.Message == GatewayReadyMessage(slotID)
+		}
+	}
+	return false
 }
