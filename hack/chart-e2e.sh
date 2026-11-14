@@ -61,19 +61,21 @@ kind create cluster --name "$cluster" --image "$node_image" --config "$work/kind
 sysctl_all 2
 
 step "images"
-export KO_DOCKER_REPO=kind.local KIND_CLUSTER_NAME="$cluster" GOWORK=off
+# Built into the local Docker daemon and loaded into every node by tag:
+# images built locally carry no registry digest.
+export KO_DOCKER_REPO=ko.local GOWORK=off
 platform="linux/$(docker version --format '{{.Server.Arch}}')"
-controller_image="$(cd "$root" && ko build --platform="$platform" --bare --tags e2e ./cmd/controller)"
-agent_image="$(cd "$root" && ko build --platform="$platform" --bare --tags e2e ./cmd/agent)"
-# Both land in one repository; tell them apart by digest.
-controller_digest="${controller_image##*@}" agent_digest="${agent_image##*@}"
-[[ "$controller_digest" == sha256:* && "$agent_digest" == sha256:* ]] || fail "ko printed no digests: $controller_image $agent_image"
+for c in controller agent; do
+	(cd "$root" && ko build --local --platform="$platform" --base-import-paths --tags e2e "./cmd/$c" >/dev/null)
+	docker image inspect "ko.local/$c:e2e" >/dev/null || fail "ko built no ko.local/$c:e2e"
+	kind load docker-image --name "$cluster" "ko.local/$c:e2e"
+done
 
 step "install"
 helm install "$release" "$root/charts/natterjack" -n "$ns" --create-namespace \
 	--set clusterName=e2e --set controller.aws.region=us-east-1 \
-	--set controller.image.repository=kind.local --set controller.image.digest="$controller_digest" \
-	--set agent.image.repository=kind.local --set agent.image.digest="$agent_digest" \
+	--set controller.image.repository=ko.local/controller --set controller.image.tag=e2e \
+	--set agent.image.repository=ko.local/agent --set agent.image.tag=e2e \
 	--set images.pullPolicy=Never
 ds="natterjack-$release-agent"
 kubectl -n "$ns" rollout status "ds/$ds" --timeout=180s || fail "agents did not become ready"
