@@ -14,3 +14,9 @@ cover.out
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*

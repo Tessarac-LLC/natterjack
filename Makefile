@@ -55,6 +55,27 @@ $(GOVULNCHECK):
 	GOBIN=$(BIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	mv $(BIN)/govulncheck $@
 
+# Terraform modules: formatted, valid, tested against a mocked provider, and
+# their README reference current.
+TERRAFORM_DOCS_VERSION := v0.25.1
+TERRAFORM_DOCS := $(BIN)/terraform-docs-$(TERRAFORM_DOCS_VERSION)
+TF_MODULES := $(wildcard deploy/terraform/*)
+
+.PHONY: terraform-check
+terraform-check: $(TERRAFORM_DOCS) ## Format, validate, test and document the Terraform modules
+	terraform fmt -check -recursive deploy/terraform
+	set -e; for m in $(TF_MODULES); do \
+		terraform -chdir=$$m init -backend=false -input=false >/dev/null; \
+		terraform -chdir=$$m validate; \
+		terraform -chdir=$$m test; \
+		$(TERRAFORM_DOCS) $$m >/dev/null; \
+	done
+	git diff --exit-code -- $(addsuffix /README.md,$(TF_MODULES)) || { echo "A module README is stale: run 'make terraform-check' and commit"; exit 1; }
+
+$(TERRAFORM_DOCS):
+	GOBIN=$(BIN) go install github.com/terraform-docs/terraform-docs@$(TERRAFORM_DOCS_VERSION)
+	mv $(BIN)/terraform-docs $@
+
 .PHONY: help
 help:
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "%-18s %s\n", $$1, $$2}'
