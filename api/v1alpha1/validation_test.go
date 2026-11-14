@@ -99,6 +99,8 @@ func TestEgressPoolValidation(t *testing.T) {
 		{name: "unknown tunnel", obj: pool(v1.EgressPoolSpec{Tunnel: "IPIP"}), wantErr: "spec.tunnel"},
 		{name: "zero max gateways", obj: pool(v1.EgressPoolSpec{MaxGatewaysPerZone: ptr.To[int32](0)}), wantErr: "maxGatewaysPerZone must be at least 1"},
 		{name: "probe too fast", obj: pool(v1.EgressPoolSpec{Probe: v1.Probe{IntervalMilliseconds: 5}}), wantErr: "spec.probe.intervalMilliseconds"},
+		{name: "warn mode", obj: pool(v1.EgressPoolSpec{SafetyChecks: v1.SafetyChecksWarn})},
+		{name: "unknown safety mode", obj: pool(v1.EgressPoolSpec{SafetyChecks: "Off"}), wantErr: "spec.safetyChecks"},
 		{name: "drain too long", obj: pool(v1.EgressPoolSpec{DrainSeconds: 3601}), wantErr: "spec.drainSeconds"},
 	})
 }
@@ -110,7 +112,8 @@ func TestEgressPoolDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Spec.Tunnel != v1.TunnelGeneve || p.Spec.DrainSeconds != 60 ||
-		p.Spec.Probe.IntervalMilliseconds != 100 || p.Spec.Probe.FailureThreshold != 3 {
+		p.Spec.Probe.IntervalMilliseconds != 100 || p.Spec.Probe.FailureThreshold != 3 ||
+		p.Spec.SafetyChecks != v1.SafetyChecksEnforce {
 		t.Fatalf("defaults not applied: %+v", p.Spec)
 	}
 }

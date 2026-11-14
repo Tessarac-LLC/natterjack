@@ -49,6 +49,19 @@ const (
 	TunnelWireGuard TunnelType = "WireGuard"
 )
 
+// SafetyChecks selects what happens to a slot that fails a safety check.
+// +kubebuilder:validation:Enum=Enforce;Warn
+type SafetyChecks string
+
+const (
+	// SafetyChecksEnforce quarantines a failing slot and detaches it if in
+	// use (default).
+	SafetyChecksEnforce SafetyChecks = "Enforce"
+	// SafetyChecksWarn uses a failing slot and reports the failure. It is for
+	// break-glass use only. A slot attached outside the cluster is never used.
+	SafetyChecksWarn SafetyChecks = "Warn"
+)
+
 // EgressPoolSpec defines a set of egress slots and how gateways are run for them.
 // +kubebuilder:validation:XValidation:rule="!has(self.maxGatewaysPerZone) || self.maxGatewaysPerZone >= 1",message="maxGatewaysPerZone must be at least 1"
 type EgressPoolSpec struct {
@@ -88,6 +101,12 @@ type EgressPoolSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
 	DrainSeconds int32 `json:"drainSeconds,omitempty"`
+
+	// SafetyChecks selects whether a slot that fails a safety check is
+	// quarantined (Enforce) or used with a warning (Warn).
+	// +optional
+	// +kubebuilder:default=Enforce
+	SafetyChecks SafetyChecks `json:"safetyChecks,omitempty"`
 }
 
 // Discovery selects slots by tag. The cluster tag is always required and its

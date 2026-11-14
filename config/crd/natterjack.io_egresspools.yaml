@@ -152,6 +152,15 @@ spec:
                     minimum: 20
                     type: integer
                 type: object
+              safetyChecks:
+                default: Enforce
+                description: |-
+                  SafetyChecks selects whether a slot that fails a safety check is
+                  quarantined (Enforce) or used with a warning (Warn).
+                enum:
+                - Enforce
+                - Warn
+                type: string
               tunnel:
                 default: Geneve
                 description: Tunnel selects the encapsulation from source nodes to
