@@ -19,11 +19,10 @@ helm install natterjack oci://ghcr.io/tessarac-llc/charts/natterjack \
 
 Before installing:
 
-- Give the controller's ServiceAccount (`<release>-controller` by default) the
-  IAM policy in `docs/aws/controller-policy.json`, using EKS Pod Identity or IRSA
-  (`controller.serviceAccount.annotations`).
-- Allow UDP `agent.tunnelPort` (6081 by default) between nodes in the node
-  security group.
+- Create the egress slots and the controller's IAM role. The Terraform module
+  in [`deploy/terraform/aws`](../../deploy/terraform/aws) does both, and opens
+  UDP `agent.tunnelPort` (6081 by default) between nodes. With IRSA, set
+  `controller.serviceAccount.annotations` to the role it outputs.
 - Set `net.ipv4.conf.all.rp_filter` to 0 or 2 on every node. EKS AMIs already
   do. The agent refuses to steer traffic on a node in strict mode and says so.
 
