@@ -4,6 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7 # let a new release age a week before it is proposed
     groups:
       actions:
         patterns: ["*"]
@@ -13,6 +15,8 @@ updates:
     directories: ["/site"]
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7 # let a new release age a week before it is proposed
     groups:
       k8s:
         patterns: ["k8s.io/*", "sigs.k8s.io/*"]
@@ -24,6 +28,8 @@ updates:
     directory: /site
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7 # let a new release age a week before it is proposed
     groups:
       site:
         patterns: ["*"]
