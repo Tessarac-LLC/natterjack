@@ -42,7 +42,7 @@ run "$net-gateway" "" -- -test.run 'TestSingleNodeGateway|TestStaleFlowsAreFlush
 docker rm "$net-gateway" >/dev/null
 
 echo "--- eBPF fast path"
-run "$net-gateway" "" -- -test.run 'TestSteerPrograms|TestEBPFFastPath'
+run "$net-gateway" "" -- -test.run 'TestSteerPrograms|TestEBPFFastPath|TestRemoveEBPFReadOnly'
 docker rm "$net-gateway" >/dev/null
 
 status=0

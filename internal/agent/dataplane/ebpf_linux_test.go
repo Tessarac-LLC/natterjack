@@ -418,3 +418,17 @@ func TestEBPFFastPath(t *testing.T) {
 		t.Fatalf("teardown left %s: %v", cfg.BPFDir, err)
 	}
 }
+
+// TestRemoveEBPFReadOnly runs the nftables-mode clean-up where /sys/fs/bpf
+// is a read-only directory with no pins, as on a node that never ran the
+// fast path: there is nothing to remove, so it must not fail.
+func TestRemoveEBPFReadOnly(t *testing.T) {
+	privileged(t)
+	ro := t.TempDir()
+	must(t, unix.Mount("tmpfs", ro, "tmpfs", unix.MS_RDONLY, ""))
+	t.Cleanup(func() { _ = unix.Unmount(ro, 0) })
+	d := &Dataplane{cfg: Config{BPFDir: ro + "/natterjack"}, log: testr.New(t)}
+	if err := d.removeEBPF(); err != nil {
+		t.Fatalf("removeEBPF on a read-only file system with no pins: %v", err)
+	}
+}

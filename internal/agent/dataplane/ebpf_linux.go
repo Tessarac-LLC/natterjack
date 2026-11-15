@@ -321,8 +321,15 @@ func (d *Dataplane) removeEBPF() error {
 		return nil
 	}
 	var errs []error
-	if err := os.RemoveAll(d.cfg.BPFDir); err != nil {
-		errs = append(errs, fmt.Errorf("remove %s: %w", d.cfg.BPFDir, err))
+	// Checked first: where /sys/fs/bpf is a read-only sysfs directory, as
+	// on nodes that never ran the fast path, removing even a missing path
+	// fails with EROFS.
+	if _, err := os.Lstat(d.cfg.BPFDir); err == nil {
+		if err := os.RemoveAll(d.cfg.BPFDir); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", d.cfg.BPFDir, err))
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("check %s: %w", d.cfg.BPFDir, err))
 	}
 	if l, err := netlink.LinkByName(DivertLink); err == nil {
 		if err := netlink.LinkDel(l); err != nil && !isNotFound(err) {
