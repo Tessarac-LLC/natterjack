@@ -79,6 +79,8 @@ func run() error {
 		link          = flag.String("gateway-link", def.Link.String(), "link-local /30 between the host and gateway namespaces")
 		stateDir      = flag.String("state-dir", def.StateDir, "directory that survives agent restarts and is emptied by a reboot (a tmpfs under /run)")
 		mss           = flag.Uint("mss", uint(def.MSS), "TCP MSS ceiling for flows leaving a slot")
+		mode          = flag.String("steering", string(def.Mode), "how pod traffic is steered: auto (eBPF when the CNI bypasses netfilter), nftables or ebpf")
+		bpfDir        = flag.String("bpf-dir", def.BPFDir, "directory on the host's BPF filesystem for the eBPF fast path's pins")
 		selfTestURL   = flag.String("self-test-url", "https://checkip.amazonaws.com", "URL that answers with the caller's public IPv4 address")
 		selfTestEvery = flag.Duration("self-test-interval", 30*time.Second, "how often a gateway tests its slot")
 		resync        = flag.Duration("resync", 30*time.Second, "how often the data path is re-applied when nothing changes")
@@ -118,6 +120,7 @@ func run() error {
 	}
 	cfg.MarkMask, cfg.TableBase, cfg.RulePriority, cfg.StateDir = uint32(mask), *tableBase, *rulePriority, *stateDir
 	cfg.TunnelPort, cfg.WireGuardPort, cfg.ProbePort, cfg.MSS = uint16(*tunnelPort), uint16(*wgPort), uint16(*probePort), uint16(*mss)
+	cfg.Mode, cfg.BPFDir = dataplane.Mode(*mode), *bpfDir
 	exclude := append([]netip.Prefix(nil), agent.DefaultExcluded...)
 	for _, s := range strings.Split(*excluded, ",") {
 		if s = strings.TrimSpace(s); s == "" {

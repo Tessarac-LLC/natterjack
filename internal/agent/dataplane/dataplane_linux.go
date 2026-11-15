@@ -156,6 +156,18 @@ func (d *Dataplane) Apply(want *agent.Desired) (Status, error) {
 	if err := c.Flush(); err != nil {
 		return st, fmt.Errorf("apply host nftables: %w", err)
 	}
+	// nftables is ready to steer before the fast path hands it packets.
+	if st.Mode = d.mode(); st.Mode == ModeEBPF {
+		ups, err := uplinks(underlay)
+		if err != nil {
+			return st, err
+		}
+		if st.Diverted, err = d.applyEBPF(want, ups); err != nil {
+			return st, err
+		}
+	} else if err := d.removeEBPF(); err != nil {
+		return st, err
+	}
 	d.flushStale(want)
 	if err := SaveMarks(d.cfg.StateDir, want.Gateways); err != nil {
 		return st, err
@@ -742,7 +754,8 @@ func (d *Dataplane) removeGateway() error {
 func (d *Dataplane) Teardown() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	var errs []error
+	// The fast path goes first: it hands packets to the rules removed next.
+	errs := []error{d.removeEBPF()}
 	errs = append(errs, d.removeGateway(), d.syncRules(nil), d.pruneRoutes(nil))
 	if c, err := nftables.New(); err == nil {
 		c.DelTable(&nftables.Table{Family: nftables.TableFamilyIPv4, Name: TableName})

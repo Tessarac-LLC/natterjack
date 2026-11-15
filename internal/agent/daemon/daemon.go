@@ -184,6 +184,14 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 		return reconcile.Result{}, fmt.Errorf("apply data path: %w", err)
 	}
 	a.ready.Store(true)
+	for _, m := range []dataplane.Mode{dataplane.ModeNFTables, dataplane.ModeEBPF} {
+		v := 0.0
+		if st.Mode == m {
+			v = 1
+		}
+		steeringMode.WithLabelValues(string(m)).Set(v)
+	}
+	divertedPackets.Store(st.Diverted)
 	a.setCondition(ctx, s.Self, v1.ConditionDataplaneReady, true, corev1.ConditionTrue, "Applied", "the node's data path is applied")
 	a.Prober.Update(a.targets(s, &d, pools))
 	a.serve(d.Gateway, st)

@@ -32,8 +32,9 @@ spec:
       priorityClassName: {{ .Values.agent.priorityClassName }}
       # The agent programs the node's own network: nftables, routes, rules,
       # GENEVE links and conntrack (CAP_NET_ADMIN), and creates and pins the
-      # gateway network namespace (CAP_SYS_ADMIN with bidirectional mount
-      # propagation, which Kubernetes allows only to privileged containers).
+      # gateway network namespace and the eBPF fast path's programs
+      # (CAP_SYS_ADMIN and CAP_BPF, with bidirectional mount propagation,
+      # which Kubernetes allows only to privileged containers).
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       # Uninstall removes the data path before the agent exits.
@@ -47,6 +48,8 @@ spec:
             {{- with .Values.agent.excludedCIDRs }}
             - --excluded-cidrs={{ join "," . }}
             {{- end }}
+            - --steering={{ .Values.agent.steering }}
+            - --bpf-dir=/sys/fs/bpf/natterjack
             - --mark-mask={{ .Values.agent.markMask }}
             - --route-table-base={{ .Values.agent.routeTableBase }}
             - --rule-priority={{ .Values.agent.rulePriority }}
@@ -101,6 +104,11 @@ spec:
             - name: state
               mountPath: {{ .Values.agent.stateDir }}
               mountPropagation: Bidirectional
+            # The fast path pins its programs and maps here so they outlive
+            # the agent's restarts.
+            - name: bpf
+              mountPath: /sys/fs/bpf
+              mountPropagation: Bidirectional
           {{- with .Values.agent.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -109,6 +117,10 @@ spec:
         - name: state
           hostPath:
             path: {{ .Values.agent.stateDir }}
+            type: DirectoryOrCreate
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
             type: DirectoryOrCreate
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:

@@ -13,6 +13,10 @@ KIND_VERSION := v0.33.0
 KO_VERSION := v0.19.1
 HELM_DOCS_VERSION := v1.14.2
 CRANE_VERSION := v0.22.1
+# clang and libbpf for the eBPF fast path, pinned so every build of the
+# object is byte for byte the same.
+BPF_BUILDER := ghcr.io/cilium/ebpf-builder:1793281567@sha256:1090b14b4ff21fa58a8d7c4eb449a3a9ad34fd8408e08a14a20a4656817d690b
+BPF_DIR := internal/agent/dataplane/bpf
 
 CONTROLLER_GEN := $(BIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
 SETUP_ENVTEST := $(BIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
@@ -30,17 +34,26 @@ CHART_PATH := $(BIN)/chart-tools:$(PATH)
 check: verify-generated lint test vuln ## Everything CI runs on Go code
 
 .PHONY: generate
-generate: $(CONTROLLER_GEN) ## Regenerate deepcopy code and CRDs
+generate: $(CONTROLLER_GEN) bpf ## Regenerate deepcopy code, CRDs and the eBPF object
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./api/...
 	rm -f config/crd/*.yaml
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd
 	rm -f charts/natterjack/files/crds/*.yaml
 	cp config/crd/*.yaml charts/natterjack/files/crds/
 
+.PHONY: bpf
+bpf: ## Build the eBPF fast path's object (needs Docker)
+	docker run --rm --platform linux/amd64 --network none -u "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR)/$(BPF_DIR):/src" -w /src $(BPF_BUILDER) sh -ec '\
+		clang-22 -O2 -g -Wall -Werror -target bpfel -mcpu=v3 -I/usr/include/x86_64-linux-gnu -c steer.c -o steer_bpfel.o; \
+		llvm-strip-22 -g steer_bpfel.o'
+
+GENERATED := api config charts/natterjack/files $(BPF_DIR)
+
 .PHONY: verify-generated
 verify-generated: generate ## Fail if generated files are out of date
-	@git diff --exit-code -- api config charts/natterjack/files || { echo "generated files are stale: run 'make generate' and commit"; exit 1; }
-	@test -z "$$(git status --porcelain -- api config charts/natterjack/files)" || { git status --porcelain -- api config charts/natterjack/files; echo "untracked generated files: run 'make generate' and commit"; exit 1; }
+	@git diff --exit-code -- $(GENERATED) || { echo "generated files are stale: run 'make generate' and commit"; exit 1; }
+	@test -z "$$(git status --porcelain -- $(GENERATED))" || { git status --porcelain -- $(GENERATED); echo "untracked generated files: run 'make generate' and commit"; exit 1; }
 
 .PHONY: lint
 lint: ## golangci-lint (install from https://golangci-lint.run)

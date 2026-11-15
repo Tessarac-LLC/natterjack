@@ -224,6 +224,10 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "steering": {
+          "type": "string",
+          "enum": ["auto", "nftables", "ebpf"]
+        },
         "wireguardPort": {
           "type": "integer",
           "minimum": 1,

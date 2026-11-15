@@ -98,6 +98,12 @@ agent:
     tag: ""
     # -- Pin by digest; takes precedence over the tag.
     digest: ""
+  # -- How pod traffic is steered. `nftables` steers in the host's netfilter
+  # hooks. `ebpf` also puts tcx programs first on the node's uplinks, for
+  # CNIs that move pod traffic past netfilter (Cilium with eBPF host
+  # routing, Calico's eBPF data plane); it needs Linux 6.6 or later. `auto`
+  # picks `ebpf` on nodes running such a CNI.
+  steering: auto
   # -- Destinations never steered, in addition to private, shared,
   # link-local and reserved ranges. Add any public ranges your VPC uses.
   excludedCIDRs: []

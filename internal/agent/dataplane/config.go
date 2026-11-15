@@ -38,6 +38,9 @@ const (
 	VethGateway = "njgw"
 	// EgressLink is the slot interface once inside the gateway namespace.
 	EgressLink = "egress0"
+	// DivertLink is the device the eBPF fast path sends steered packets
+	// back into the host's network stack through.
+	DivertLink = "njd0"
 	// VNI is the GENEVE virtual network identifier on every tunnel packet.
 	VNI = 0x4e4a
 	// WireGuardLink is the WireGuard device of a gateway whose pool
@@ -46,6 +49,20 @@ const (
 	// WireGuardPrefix starts the name of each WireGuard device a source node
 	// has, one per encrypted gateway, followed by the gateway's mark index.
 	WireGuardPrefix = "njw-"
+)
+
+// Mode selects how pod traffic is steered.
+type Mode string
+
+const (
+	// ModeAuto uses eBPF when the node's CNI moves pod traffic past
+	// netfilter (Cilium, Calico in eBPF mode), and nftables otherwise.
+	ModeAuto Mode = "auto"
+	// ModeNFTables steers in the host's netfilter hooks only.
+	ModeNFTables Mode = "nftables"
+	// ModeEBPF also steers on the node's uplinks with tcx programs, ahead of
+	// the CNI's (Linux 6.6 or later).
+	ModeEBPF Mode = "ebpf"
 )
 
 // Config sets what the agent may use on the node.
@@ -73,6 +90,12 @@ type Config struct {
 	// MSS is the TCP MSS ceiling for flows leaving the slot. Internet paths
 	// carry 1500 byte packets even when the VPC carries jumbo frames.
 	MSS uint16
+	// Mode selects how pod traffic is steered.
+	Mode Mode
+	// BPFDir is where the eBPF fast path pins its programs' links and maps
+	// so they outlive agent restarts: a directory on the host's BPF
+	// filesystem.
+	BPFDir string
 }
 
 // DefaultConfig works with the AWS VPC CNI, kube-proxy, Calico and Cilium
@@ -81,7 +104,7 @@ func DefaultConfig() Config {
 	return Config{
 		MarkMask: 0x00ff0000, TableBase: 7700, RulePriority: 7700, TunnelPort: 6081, WireGuardPort: 51871,
 		Link: netip.MustParsePrefix("169.254.73.0/30"), ProbePort: 6086,
-		StateDir: "/run/natterjack", MSS: 1460,
+		StateDir: "/run/natterjack", MSS: 1460, Mode: ModeAuto, BPFDir: "/sys/fs/bpf/natterjack",
 	}
 }
 
@@ -111,6 +134,14 @@ func (c Config) Validate() error {
 	if c.TunnelPort == c.WireGuardPort {
 		return fmt.Errorf("the GENEVE and WireGuard ports must differ")
 	}
+	switch c.Mode {
+	case ModeAuto, ModeNFTables, ModeEBPF:
+	default:
+		return fmt.Errorf("mode %q must be auto, nftables or ebpf", c.Mode)
+	}
+	if c.Mode != ModeNFTables && c.BPFDir == "" {
+		return fmt.Errorf("a BPF directory is required unless the mode is nftables")
+	}
 	return nil
 }
 
@@ -131,11 +162,17 @@ func (c Config) HostAddr() netip.Addr { return c.Link.Addr().Next() }
 // GatewayAddr is the gateway namespace end, where probes are answered.
 func (c Config) GatewayAddr() netip.Addr { return c.Link.Addr().Next().Next() }
 
-// Status is what Apply found on a gateway node.
+// Status is what Apply found: the node's steering and, on a gateway node,
+// whether its gateway serves.
 type Status struct {
 	// Serving is true once the slot is in the gateway namespace with its
 	// address, routes and rules.
 	Serving bool
 	// Reason says why the gateway is not serving.
 	Reason string
+	// Mode is how this node's pod traffic is steered: nftables or ebpf.
+	Mode Mode
+	// Diverted counts packets the eBPF fast path sent to be steered since
+	// its maps were created.
+	Diverted uint64
 }
