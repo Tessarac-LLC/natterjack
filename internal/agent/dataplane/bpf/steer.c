@@ -156,6 +156,10 @@ int nj_egress(struct __sk_buff *skb)
 		mac[i] = divert_mac[i];
 	if (bpf_skb_store_bytes(skb, 0, mac, ETH_ALEN, 0))
 		return NJ_TCX_NEXT;
+	// The packet starts again in the host's stack, where nftables reads the
+	// mark to pick its gateway. A data plane's own mark, such as the security
+	// identity Cilium keeps in the upper bits, would pick one for it.
+	skb->mark = 0;
 	__u32 zero = 0;
 	__u64 *n = bpf_map_lookup_elem(&nj_diverted, &zero);
 	if (n)
