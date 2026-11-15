@@ -18,6 +18,7 @@ package aws
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -97,5 +98,17 @@ func TestPolicyRejectsUnsafeClusterNames(t *testing.T) {
 		if _, err := Policy(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// The Terraform module grants the controller the same policy the provider
+// documents; a change to one without the other fails here.
+func TestTerraformModuleGrantsThisPolicy(t *testing.T) {
+	module, err := os.ReadFile("../../../deploy/terraform/aws/controller-policy.json.tftpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.ReplaceAll(string(module), "${cluster_name}", "CLUSTER_NAME"); got != policyTemplate {
+		t.Fatalf("deploy/terraform/aws/controller-policy.json.tftpl differs from policy.json:\n%s", got)
 	}
 }

@@ -1,0 +1,147 @@
+mock_provider "aws" {
+  mock_data "aws_subnet" {
+    defaults = {
+      vpc_id            = "vpc-0000000000000000a"
+      availability_zone = "us-east-1a"
+    }
+  }
+  mock_resource "aws_network_interface" {
+    defaults = { id = "eni-00000000000000000" }
+  }
+  mock_resource "aws_iam_role" {
+    defaults = { arn = "arn:aws:iam::111122223333:role/natterjack-test" }
+  }
+}
+
+variables {
+  cluster_name    = "prod-east"
+  slot_subnet_ids = ["subnet-0000000000000000a"]
+}
+
+run "slots_pass_the_controllers_safety_checks" {
+  command = plan
+
+  assert {
+    condition     = length(aws_network_interface.slot) == 2 && length(aws_eip.slot) == 2 && length(aws_eip_association.slot) == 2
+    error_message = "Each subnet gets slots_per_subnet ENIs, each with its own Elastic IP."
+  }
+
+  assert {
+    condition = alltrue([for e in aws_network_interface.slot : (
+      e.source_dest_check == false
+      && e.tags["natterjack.io/egress"] == "true"
+      && e.tags["natterjack.io/cluster"] == "prod-east"
+      && e.tags["node.k8s.amazonaws.com/no_manage"] == "true"
+    )])
+    error_message = "A slot needs source/destination check off and the egress, cluster and no_manage tags."
+  }
+
+  assert {
+    condition     = aws_vpc_security_group_egress_rule.slot_ipv4.cidr_ipv4 == "0.0.0.0/0" && length(aws_vpc_security_group_ingress_rule.tunnel) == 0
+    error_message = "The slot security group has egress only; no tunnel rule without a node security group."
+  }
+}
+
+run "caller_tags_cannot_override_slot_tags" {
+  command = plan
+
+  variables {
+    tags = {
+      "natterjack.io/cluster"            = "someone-else"
+      "node.k8s.amazonaws.com/no_manage" = "false"
+      team                               = "platform"
+    }
+  }
+
+  assert {
+    condition = alltrue([for e in aws_network_interface.slot : (
+      e.tags["natterjack.io/cluster"] == "prod-east"
+      && e.tags["node.k8s.amazonaws.com/no_manage"] == "true"
+      && e.tags["team"] == "platform"
+    )])
+    error_message = "Slot tags win over caller tags; other caller tags are kept."
+  }
+}
+
+run "pod_identity_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(aws_eks_pod_identity_association.controller) == 1 && aws_eks_pod_identity_association.controller[0].service_account == "natterjack-controller" && aws_eks_pod_identity_association.controller[0].namespace == "natterjack"
+    error_message = "The default identity is an EKS Pod Identity association for natterjack/natterjack-controller."
+  }
+
+  assert {
+    condition     = jsondecode(aws_iam_role.controller.assume_role_policy).Statement[0].Principal.Service == "pods.eks.amazonaws.com"
+    error_message = "Only the EKS Pod Identity service may assume the role."
+  }
+
+  assert {
+    condition     = strcontains(aws_iam_role_policy.controller.policy, "\"aws:ResourceTag/natterjack.io/cluster\": \"prod-east\"") && !strcontains(aws_iam_role_policy.controller.policy, "$${cluster_name}")
+    error_message = "The policy is scoped to this cluster's slots."
+  }
+}
+
+run "irsa_trusts_only_the_controller_service_account" {
+  command = plan
+
+  variables {
+    identity          = "irsa"
+    oidc_provider_arn = "arn:aws:iam::111122223333:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE"
+    namespace         = "egress"
+    service_account   = "nj-controller"
+  }
+
+  assert {
+    condition     = length(aws_eks_pod_identity_association.controller) == 0
+    error_message = "No Pod Identity association with IRSA."
+  }
+
+  assert {
+    condition = (
+      jsondecode(aws_iam_role.controller.assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE:sub"] == "system:serviceaccount:egress:nj-controller"
+      && jsondecode(aws_iam_role.controller.assume_role_policy).Statement[0].Condition.StringEquals["oidc.eks.us-east-1.amazonaws.com/id/EXAMPLE:aud"] == "sts.amazonaws.com"
+    )
+    error_message = "IRSA trust must be limited to the controller's ServiceAccount."
+  }
+}
+
+run "irsa_without_provider_is_refused" {
+  command = plan
+
+  variables {
+    identity = "irsa"
+  }
+
+  expect_failures = [aws_iam_role.controller]
+}
+
+run "bootstrap_route_and_tunnel_rule" {
+  command = plan
+
+  variables {
+    bootstrap_route_table_ids = { "subnet-0000000000000000a" = "rtb-0000000000000000a" }
+    node_security_group_id    = "sg-0000000000000000a"
+  }
+
+  assert {
+    condition     = aws_route.bootstrap["subnet-0000000000000000a"].destination_cidr_block == "0.0.0.0/0" && aws_route.bootstrap["subnet-0000000000000000a"].route_table_id == "rtb-0000000000000000a"
+    error_message = "The bootstrap route sends the private route table's default route to the zone's first slot."
+  }
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.tunnel[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel[0].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel[0].referenced_security_group_id == "sg-0000000000000000a"
+    error_message = "The tunnel rule allows UDP 6081 between nodes only."
+  }
+}
+
+run "bad_inputs_are_refused" {
+  command = plan
+
+  variables {
+    cluster_name     = "bad name"
+    slots_per_subnet = 0
+  }
+
+  expect_failures = [var.cluster_name, var.slots_per_subnet]
+}
