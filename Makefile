@@ -12,6 +12,7 @@ KUBECONFORM_VERSION := v0.8.0
 KIND_VERSION := v0.33.0
 KO_VERSION := v0.19.1
 HELM_DOCS_VERSION := v1.14.2
+CRANE_VERSION := v0.22.1
 
 CONTROLLER_GEN := $(BIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
 SETUP_ENVTEST := $(BIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
@@ -21,6 +22,7 @@ KUBECONFORM := $(BIN)/kubeconform-$(KUBECONFORM_VERSION)
 KIND := $(BIN)/kind-$(KIND_VERSION)
 KO := $(BIN)/ko-$(KO_VERSION)
 HELM_DOCS := $(BIN)/helm-docs-$(HELM_DOCS_VERSION)
+CRANE := $(BIN)/crane-$(CRANE_VERSION)
 # Chart scripts find the pinned tools first.
 CHART_PATH := $(BIN)/chart-tools:$(PATH)
 
@@ -66,13 +68,14 @@ chart-e2e: chart-tools ## Install the chart on a throwaway kind cluster and prov
 	PATH="$(CHART_PATH)" ./hack/chart-e2e.sh $(KIND_NODE_IMAGE)
 
 .PHONY: chart-tools
-chart-tools: $(HELM) $(KUBECONFORM) $(KIND) $(KO) $(HELM_DOCS)
+chart-tools: $(HELM) $(KUBECONFORM) $(KIND) $(KO) $(HELM_DOCS) $(CRANE)
 	mkdir -p $(BIN)/chart-tools
 	ln -sf $(HELM) $(BIN)/chart-tools/helm
 	ln -sf $(KUBECONFORM) $(BIN)/chart-tools/kubeconform
 	ln -sf $(KIND) $(BIN)/chart-tools/kind
 	ln -sf $(KO) $(BIN)/chart-tools/ko
 	ln -sf $(HELM_DOCS) $(BIN)/chart-tools/helm-docs
+	ln -sf $(CRANE) $(BIN)/chart-tools/crane
 
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Known vulnerabilities reachable from our code
@@ -130,6 +133,14 @@ $(KIND):
 $(KO):
 	GOBIN=$(BIN) go install github.com/google/ko@$(KO_VERSION)
 	mv $(BIN)/ko $@
+
+.PHONY: release-dry-run
+release-dry-run: chart-tools ## Build and push a release to a throwaway local registry and check it
+	PATH="$(CHART_PATH)" ./hack/release-dry-run.sh
+
+$(CRANE):
+	GOBIN=$(BIN) go install github.com/google/go-containerregistry/cmd/crane@$(CRANE_VERSION)
+	mv $(BIN)/crane $@
 
 .PHONY: help
 help:

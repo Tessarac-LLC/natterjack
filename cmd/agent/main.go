@@ -44,6 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -51,6 +52,7 @@ import (
 	"github.com/Tessarac-LLC/natterjack/internal/agent"
 	"github.com/Tessarac-LLC/natterjack/internal/agent/daemon"
 	"github.com/Tessarac-LLC/natterjack/internal/agent/dataplane"
+	"github.com/Tessarac-LLC/natterjack/internal/version"
 )
 
 func main() {
@@ -81,11 +83,18 @@ func run() error {
 		resync        = flag.Duration("resync", 30*time.Second, "how often the data path is re-applied when nothing changes")
 		metricsAddr   = flag.String("metrics-bind-address", ":9751", "HTTPS address for metrics, which require an authorized Kubernetes identity; 0 disables")
 		probeAddr     = flag.String("health-probe-bind-address", ":9752", "address for liveness and readiness probes")
+		showVersion   = flag.Bool("version", false, "print the release and exit")
 	)
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if *showVersion {
+		fmt.Println(version.Version)
+		return nil
+	}
+	ctrlmetrics.Registry.MustRegister(version.BuildInfo("agent"))
+	ctrl.Log.Info("starting natterjack agent", "version", version.Version)
 	log := ctrl.Log.WithName("agent")
 
 	if *nodeName == "" || *namespace == "" || *podName == "" {

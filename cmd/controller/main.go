@@ -37,12 +37,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
 	awsprovider "github.com/Tessarac-LLC/natterjack/internal/cloud/aws"
 	"github.com/Tessarac-LLC/natterjack/internal/controller"
+	"github.com/Tessarac-LLC/natterjack/internal/version"
 )
 
 func main() {
@@ -62,11 +64,18 @@ func run() error {
 		probeAddr      = flag.String("health-probe-bind-address", ":8081", "address for liveness and readiness probes")
 		leaderElect    = flag.Bool("leader-elect", true, "elect a leader so only one replica acts")
 		resync         = flag.Duration("resync", 30*time.Second, "how often to re-read the cloud when nothing in the cluster changes")
+		showVersion    = flag.Bool("version", false, "print the release and exit")
 	)
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if *showVersion {
+		fmt.Println(version.Version)
+		return nil
+	}
+	ctrlmetrics.Registry.MustRegister(version.BuildInfo("controller"))
+	ctrl.Log.Info("starting natterjack controller", "version", version.Version)
 
 	if *clusterName == "" {
 		return errors.New("--cluster-name is required")

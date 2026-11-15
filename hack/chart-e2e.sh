@@ -63,7 +63,7 @@ sysctl_all 2
 step "images"
 # Built into the local Docker daemon and loaded into every node by tag:
 # images built locally carry no registry digest.
-export KO_DOCKER_REPO=ko.local GOWORK=off
+export KO_DOCKER_REPO=ko.local GOWORK=off VERSION=v0.0.0-e2e
 platform="linux/$(docker version --format '{{.Server.Arch}}')"
 for c in controller agent; do
 	(cd "$root" && ko build --local --platform="$platform" --base-import-paths --tags e2e "./cmd/$c" >/dev/null)
@@ -89,6 +89,11 @@ for _ in $(seq 60); do
 done
 [[ -n "$holder" ]] || fail "no controller holds the leader lease"
 echo "leader: $holder"
+for c in controller agent; do
+	logs="$(kubectl -n "$ns" logs -l "app.kubernetes.io/component=$c" --tail=-1)"
+	grep -q '"version":"v0.0.0-e2e"' <<<"$logs" ||
+		fail "the $c does not log the release it runs"
+done
 
 step "no RBAC denials in any log"
 sleep 20 # one agent resync and a controller pass
