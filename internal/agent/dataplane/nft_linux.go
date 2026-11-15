@@ -322,6 +322,16 @@ func snat(to netip.Addr) []expr.Any {
 	}
 }
 
+// keepSource translates a flow's source address to itself. It changes
+// nothing but claims the flow's translation, so later source NAT chains,
+// such as a CNI's masquerade, pass it by.
+func keepSource() []expr.Any {
+	return []expr.Any{
+		addr(true),
+		&expr.NAT{Type: expr.NATTypeSourceNAT, Family: unix.NFPROTO_IPV4, RegAddrMin: reg1},
+	}
+}
+
 // flowHash picks a bucket from the flow's addresses and ports and jumps to
 // the bucket's gateway.
 func flowHash(ring *nftables.Set) []expr.Any {
@@ -469,6 +479,14 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 		r.rule(post, markBits(false, mask, expr.CmpOpNeq), ifIs(false, link, true), snat(d.NodeIP))
 	}
 	r.rule(post, markBits(false, mask, expr.CmpOpNeq), ifWireGuard(false), snat(d.NodeIP))
+	// A serving gateway hands tunneled flows to its namespace with their
+	// node's address, which the namespace's firewall checks. Binding the
+	// address to itself, before the CNI's own source translation, keeps a
+	// masquerade of every destination off the pod network (kindnet's, the AWS
+	// VPC CNI's of addresses outside the VPC) from rewriting it.
+	if gatewayTunnel != "" {
+		r.rule(post, ifIs(true, gatewayTunnel, true), ifIs(false, VethHost, true), keepSource())
+	}
 	mss := r.base("mss", nftables.ChainTypeFilter, nftables.ChainHookPostrouting, prioMangle, nil)
 	r.rule(mss, ifIs(false, TunnelLink, true), tcpSyn(), clampToRoute())
 	r.rule(mss, ifWireGuard(false), tcpSyn(), clampToRoute())
