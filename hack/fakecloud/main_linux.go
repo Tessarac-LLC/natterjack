@@ -74,7 +74,11 @@ func run(configPath, listen, out string, detachDelay time.Duration) error {
 	if err := os.MkdirAll(out, 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", out, err)
 	}
-	if err := os.WriteFile(filepath.Join(out, "ca.crt"), caPEM, 0o600); err != nil {
+	// Readable by all: the fake runs as root and the test that reads the
+	// certificate through the bind mount does not, and a CA certificate is
+	// public.
+	if err := os.WriteFile(filepath.Join(out, "ca.crt"), caPEM, 0o644); err != nil { //nolint:gosec // see above
+
 		return fmt.Errorf("write CA: %w", err)
 	}
 	tlsLn, plainLn, err := world.listenInternet(ctx)
