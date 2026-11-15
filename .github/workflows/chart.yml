@@ -69,7 +69,7 @@ jobs:
         run: make chart-e2e
 
   datapath:
-    name: datapath / e2e (${{ matrix.cni }})
+    name: datapath / e2e (${{ matrix.cni }}${{ matrix.mesh && format(', {0}', matrix.mesh) || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
@@ -80,6 +80,13 @@ jobs:
         # kindnet steers with nftables; Cilium and Calico's eBPF data planes
         # bypass netfilter and take the eBPF fast path.
         cni: [kindnet, cilium, calico]
+        mesh: [""]
+        # Service meshes redirect pod traffic to their proxies and mark
+        # their own sockets.
+        include:
+          - {cni: kindnet, mesh: istio}
+          - {cni: kindnet, mesh: ambient}
+          - {cni: kindnet, mesh: linkerd}
     steps:
       - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
@@ -97,7 +104,8 @@ jobs:
       - name: Send egress traffic through a fake EC2, fail a gateway over and uninstall
         env:
           CNI: ${{ matrix.cni }}
-        run: make datapath-e2e CNI="$CNI"
+          MESH: ${{ matrix.mesh }}
+        run: make datapath-e2e CNI="$CNI" MESH="$MESH"
 
   release-dry-run:
     name: release / dry-run

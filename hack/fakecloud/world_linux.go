@@ -333,7 +333,7 @@ func (w *World) reclaim(i int) error {
 	if err != nil {
 		return fmt.Errorf("slot %s: %w", s.ID, err)
 	}
-	for _, ns := range namespaces() {
+	for _, ns := range w.namespaces() {
 		found, err := w.takeBack(ns, mac, i)
 		_ = ns.Close()
 		if err != nil {
@@ -397,13 +397,17 @@ func (w *World) takeBack(ns netns.NsHandle, mac net.HardwareAddr, i int) (bool, 
 	return false, nil
 }
 
-// namespaces returns every network namespace on the host other than the
-// world's: those of processes and those pinned by bind mounts, which is
-// how the agent keeps its gateway namespace.
-func namespaces() []netns.NsHandle {
-	self, _ := netns.Get()
-	seen := map[string]bool{self.UniqueId(): true}
-	_ = self.Close()
+// namespaces returns the network namespaces a slot's near end can be in:
+// each of this VPC's nodes' own, and those its nodes pin with bind mounts,
+// which is how the agent keeps its gateway namespace. Nothing else on the
+// host is looked at: another fake on the same host gives its slots the
+// same MACs, and taking those would break that test.
+func (w *World) namespaces() []netns.NsHandle {
+	nodes := map[string]bool{}
+	for i := range w.cfg.Instances {
+		nodes[w.cfg.Instances[i].Node] = true
+	}
+	seen := map[string]bool{}
 	var out []netns.NsHandle
 	add := func(ns netns.NsHandle, err error) {
 		if err != nil {
@@ -418,15 +422,20 @@ func namespaces() []netns.NsHandle {
 	}
 	procs, _ := os.ReadDir("/proc")
 	for _, p := range procs {
-		pid, err := strconv.Atoi(p.Name())
-		if err != nil {
+		if _, err := strconv.Atoi(p.Name()); err != nil {
 			continue
 		}
+		if comm, _ := os.ReadFile(filepath.Join("/proc", p.Name(), "comm")); strings.TrimSpace(string(comm)) != "systemd" {
+			continue
+		}
+		host, _ := os.ReadFile(filepath.Join("/proc", p.Name(), "root", "etc", "hostname"))
+		if !nodes[strings.TrimSpace(string(host))] {
+			continue
+		}
+		pid, _ := strconv.Atoi(p.Name())
 		add(netns.GetFromPid(pid))
-		if comm, _ := os.ReadFile(filepath.Join("/proc", p.Name(), "comm")); strings.TrimSpace(string(comm)) == "systemd" {
-			for _, m := range nsfsMounts(pid) {
-				add(netns.GetFromPath(filepath.Join("/proc", p.Name(), "root", m)))
-			}
+		for _, m := range nsfsMounts(pid) {
+			add(netns.GetFromPath(filepath.Join("/proc", p.Name(), "root", m)))
 		}
 	}
 	return out

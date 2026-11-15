@@ -11,22 +11,32 @@
 #   3. a selected pod leaves from its own zone's Elastic IP; an
 #      unselected pod and the node leave from the node's address;
 #   4. traffic to an excluded destination is not steered;
-#   5. when a gateway node stops, its slot moves to another node in the
-#      zone and the pod leaves from the same Elastic IP again;
+#   5. when a gateway node dies, new flows take another zone's gateway
+#      within seconds, then its slot moves to another node in the zone and
+#      the pod leaves from the same Elastic IP again;
 #   6. uninstalling removes every kernel object and every attachment.
+# With MESH set, the test pods run in that service mesh, whose proxies
+# redirect their traffic and mark their own sockets: istio (sidecars),
+# ambient (Istio's ztunnel) or linkerd.
 #
-# Usage: hack/datapath-e2e.sh [kindnet|cilium|calico] [kindest/node image]
+# Usage: [MESH=istio|ambient|linkerd] hack/datapath-e2e.sh [kindnet|cilium|calico] [kindest/node image]
 set -euo pipefail
 
 cni="${1:-kindnet}"
 node_image="${2:-kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5}"
+mesh="${MESH:-}"
 case "$cni" in kindnet | cilium | calico) ;; *)
 	echo "unknown CNI $cni; want kindnet, cilium or calico" >&2
 	exit 2
 	;;
 esac
+case "$mesh" in "" | istio | ambient | linkerd) ;; *)
+	echo "unknown mesh $mesh; want istio, ambient or linkerd" >&2
+	exit 2
+	;;
+esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
-cluster="nj-dp-$cni-$$"
+cluster="nj-dp-$cni${mesh:+-$mesh}-$$"
 cloud="$cluster-cloud"
 ns=natterjack
 release=dp
@@ -77,7 +87,7 @@ workers=(worker worker2 worker3 worker4 worker5)
 zones=(zone-a zone-a zone-a zone-b zone-b)
 instance() { printf 'i-%016x' "$1"; }
 
-step "cluster $cluster ($cni) on $node_image"
+step "cluster $cluster ($cni${mesh:+, $mesh}) on $node_image"
 {
 	cat <<EOF
 kind: Cluster
@@ -170,6 +180,48 @@ kubectl wait --for=condition=Ready nodes --all --timeout=600s >/dev/null || fail
 # The agent refuses strict reverse-path filtering, which the Docker host
 # hands down to kind nodes; EKS AMIs ship loose mode.
 for n in $(kind get nodes --name "$cluster"); do docker exec "$n" sysctl -qw net.ipv4.conf.all.rp_filter=2; done
+
+if [[ -n "$mesh" ]]; then
+	step "mesh"
+	helm repo add istio https://istio-release.storage.googleapis.com/charts >/dev/null 2>&1 || true
+	helm repo add linkerd-edge https://helm.linkerd.io/edge >/dev/null 2>&1 || true
+	helm repo update istio linkerd-edge >/dev/null
+	case "$mesh" in
+	istio)
+		iv="${ISTIO_VERSION:?set ISTIO_VERSION}"
+		helm install istio-base istio/base -n istio-system --create-namespace --version "$iv" --wait >/dev/null
+		helm install istiod istio/istiod -n istio-system --version "$iv" --wait --timeout 10m >/dev/null
+		;;
+	ambient)
+		iv="${ISTIO_VERSION:?set ISTIO_VERSION}"
+		helm install istio-base istio/base -n istio-system --create-namespace --version "$iv" --wait >/dev/null
+		helm install istiod istio/istiod -n istio-system --version "$iv" --set profile=ambient --wait --timeout 10m >/dev/null
+		helm install istio-cni istio/cni -n istio-system --version "$iv" --set profile=ambient --wait --timeout 10m >/dev/null
+		helm install ztunnel istio/ztunnel -n istio-system --version "$iv" --wait --timeout 10m >/dev/null
+		;;
+	linkerd)
+		kubectl apply --server-side -f \
+			"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION:?set GATEWAY_API_VERSION}/experimental-install.yaml" >/dev/null
+		# Linkerd's identity needs a trust anchor and an issuer under it.
+		pki="$work/linkerd"
+		mkdir -p "$pki"
+		openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 -subj /CN=root.linkerd.cluster.local \
+			-addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign \
+			-keyout "$pki/ca.key" -out "$pki/ca.crt" 2>/dev/null
+		openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=identity.linkerd.cluster.local \
+			-keyout "$pki/issuer.key" -out "$pki/issuer.csr" 2>/dev/null
+		printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$pki/issuer.ext"
+		openssl x509 -req -in "$pki/issuer.csr" -CA "$pki/ca.crt" -CAkey "$pki/ca.key" -CAcreateserial -days 2 \
+			-extfile "$pki/issuer.ext" -out "$pki/issuer.crt" 2>/dev/null
+		lv="${LINKERD_VERSION:?set LINKERD_VERSION}"
+		helm install linkerd-crds linkerd-edge/linkerd-crds -n linkerd --create-namespace --version "$lv" --wait >/dev/null
+		helm install linkerd-control-plane linkerd-edge/linkerd-control-plane -n linkerd --version "$lv" \
+			--set-file identityTrustAnchorsPEM="$pki/ca.crt" \
+			--set-file identity.issuer.tls.crtPEM="$pki/issuer.crt" \
+			--set-file identity.issuer.tls.keyPEM="$pki/issuer.key" --wait --timeout 10m >/dev/null
+		;;
+	esac
+fi
 
 step "fake cloud"
 cat >"$work/config.json" <<EOF
@@ -305,6 +357,11 @@ pick() {
 pod_a="$(pick zone-a "$gw_a")"
 pod_b="$(pick zone-b "$gw_b")"
 kubectl create namespace app >/dev/null
+case "$mesh" in
+istio) kubectl label namespace app istio-injection=enabled >/dev/null ;;
+ambient) kubectl label namespace app istio.io/dataplane-mode=ambient >/dev/null ;;
+linkerd) kubectl annotate namespace app linkerd.io/inject=enabled >/dev/null ;;
+esac
 kubectl -n app create configmap fakecloud-ca --from-file=ca.crt="$work/out/ca.crt" >/dev/null
 run_pod() {
 	kubectl -n app apply -f - >/dev/null <<EOF
@@ -326,7 +383,20 @@ EOF
 run_pod steered-a "$pod_a" "yes"
 run_pod steered-b "$pod_b" "yes"
 run_pod plain-a "$pod_a" "no"
-kubectl -n app wait pod --all --for=condition=Ready --timeout=120s >/dev/null || fail "test pods did not start"
+kubectl -n app wait pod --all --for=condition=Ready --timeout=300s >/dev/null || fail "test pods did not start"
+# The mesh must really have taken the pods' traffic, or the test proves
+# nothing about it.
+containers() { kubectl -n app get pod "$1" -o jsonpath='{.spec.initContainers[*].name} {.spec.containers[*].name}'; }
+meshed() {
+	case "$mesh" in
+	istio) grep -qw istio-proxy <<<"$(containers "$1")" ;;
+	ambient) [[ "$(kubectl -n app get pod "$1" -o jsonpath='{.metadata.annotations.ambient\.istio\.io/redirection}')" == enabled ]] ;;
+	linkerd) grep -qw linkerd-proxy <<<"$(containers "$1")" ;;
+	esac
+}
+if [[ -n "$mesh" ]]; then
+	for p in steered-a steered-b plain-a; do meshed "$p" || fail "$p is not in the $mesh mesh"; done
+fi
 kubectl apply -f - >/dev/null <<EOF
 apiVersion: natterjack.io/v1alpha1
 kind: EgressPolicy
@@ -340,7 +410,7 @@ EOF
 # check goes through the same host's 203.0.113.1 and must therefore leave
 # unsteered. A second address on the host is not excluded.
 docker exec "$cloud" ip netns exec internet ip addr add 203.0.113.9/24 dev eth0
-http() { kubectl -n app exec "$1" -- wget -qO- -T 5 "http://$2/"; }
+http() { kubectl -n app exec "$1" -c c -- wget -qO- -T 5 "http://$2/"; }
 from_is() { [[ "$(http "$1" "$2")" == "$3" ]]; }
 eventually 60 "steered-a leaves from zone-a's Elastic IP" from_is steered-a 203.0.113.9 198.51.100.11
 eventually 30 "steered-b leaves from zone-b's Elastic IP" from_is steered-b 203.0.113.9 198.51.100.21
@@ -350,12 +420,21 @@ from_is steered-a 203.0.113.1 198.51.100.200 || fail "an excluded destination wa
 echo "steered-a: $(http steered-a 203.0.113.9), steered-b: $(http steered-b 203.0.113.9), plain-a: $(http plain-a 203.0.113.9)"
 
 step "failover"
+# The zone-a gateway node dies without warning. Within the probes' window
+# (200ms x 5) new flows from zone-a take zone-b's gateway; the slot then
+# moves to another zone-a node once Kubernetes marks the dead node not
+# ready, and flows come back to zone-a's Elastic IP.
 start=$(date +%s)
-docker stop "$gw_a" >/dev/null
+docker kill "$gw_a" >/dev/null
+eventually 30 "steered-a falls back to zone-b's gateway" from_is steered-a 203.0.113.9 198.51.100.21
+fallback=$(($(date +%s) - start))
+# The probes need about a second; the rest of the bound is the exec and
+# the client's own timeout.
+((fallback <= 10)) || fail "new flows took ${fallback}s to leave the dead gateway"
 moved() { [[ "$(slot eni-a1 state)" == Active && "$(slot eni-a1 node)" != "$gw_a" ]]; }
-eventually 240 "eni-a1 moves off the stopped node" moved
+eventually 240 "eni-a1 moves off the dead node" moved
 eventually 120 "steered-a leaves from the same Elastic IP" from_is steered-a 203.0.113.9 198.51.100.11
-echo "eni-a1 moved from $gw_a to $(slot eni-a1 node); traffic back after $(($(date +%s) - start))s"
+echo "new flows left through zone-b after ${fallback}s; eni-a1 moved from $gw_a to $(slot eni-a1 node), zone-a's Elastic IP back after $(($(date +%s) - start))s"
 docker start "$gw_a" >/dev/null
 
 step "uninstall"
@@ -369,4 +448,4 @@ for n in $(kind get nodes --name "$cluster"); do
 		fail "$n still holds Natterjack kernel objects"
 	fi
 done
-echo "PASS ($cni)"
+echo "PASS ($cni${mesh:+, $mesh})"
