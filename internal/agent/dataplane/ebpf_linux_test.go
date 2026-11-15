@@ -95,14 +95,26 @@ func steerPrograms(t *testing.T) *ebpf.Collection {
 // the verdict and the packet as the program left it.
 func run(t *testing.T, prog *ebpf.Program, pkt []byte, ingressIfindex uint32) (uint32, []byte) {
 	t.Helper()
+	ret, out, _ := runMarked(t, prog, pkt, ingressIfindex, 0)
+	return ret, out
+}
+
+// runMarked runs prog on a packet that carries mark, and returns the mark
+// the packet leaves with.
+func runMarked(t *testing.T, prog *ebpf.Program, pkt []byte, ingressIfindex, mark uint32) (uint32, []byte, uint32) {
+	t.Helper()
 	// struct __sk_buff up to and including ingress_ifindex; the kernel
 	// takes a shorter context and zeroes the rest.
 	ctx := make([]byte, 40)
+	binary.NativeEndian.PutUint32(ctx[8:], mark)
 	binary.NativeEndian.PutUint32(ctx[36:], ingressIfindex)
+	// The kernel writes back the whole struct, so the room for it must
+	// hold all of it.
+	ctxOut := make([]byte, 256)
 	out := make([]byte, len(pkt))
-	ret, err := prog.Run(&ebpf.RunOptions{Data: pkt, DataOut: out, Context: ctx})
+	ret, err := prog.Run(&ebpf.RunOptions{Data: pkt, DataOut: out, Context: ctx, ContextOut: ctxOut})
 	must(t, err)
-	return ret, out
+	return ret, out, binary.NativeEndian.Uint32(ctxOut[8:])
 }
 
 // TestSteerPrograms checks each decision the fast path makes.
@@ -129,6 +141,15 @@ func TestSteerPrograms(t *testing.T) {
 	must(t, err)
 	if n != 1 {
 		t.Fatalf("diverted count %d, want 1", n)
+	}
+	// A mark the data plane set, here a Cilium identity in the bits the
+	// agent's gateway marks use, does not survive the divert.
+	if ret, _, mark := runMarked(t, egress, packet(podIP, internet, unix.IPPROTO_UDP, 40001, echoPort), 3, 0x00020f00); ret != tcActRedirect || mark != 0 {
+		t.Fatalf("a marked packet: verdict %#x, mark %#x; want redirect with no mark", ret, mark)
+	}
+	// What the divert device sends back keeps its mark.
+	if ret, _, mark := runMarked(t, egress, packet(podIP, internet, unix.IPPROTO_UDP, 40002, echoPort), testDivertIdx, 0x00010000); ret != tcxNext || mark != 0x00010000 {
+		t.Fatalf("a packet back from the divert device: verdict %#x, mark %#x; want next with its mark", ret, mark)
 	}
 
 	for _, c := range []struct {
