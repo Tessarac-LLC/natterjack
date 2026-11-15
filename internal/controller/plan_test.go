@@ -206,6 +206,41 @@ func TestRestartingAgentKeepsSlot(t *testing.T) {
 		t.Fatalf("requeue %s, want the end of the grace", p.RequeueAfter)
 	}
 
+	// The new agent pod is up before the controller assigns it again. The
+	// slot stays Active while it comes back on the same slot, and is
+	// assigned to it; anything else it reports ends that.
+	for _, tc := range []struct {
+		name   string
+		agent  Agent
+		active bool
+	}{
+		{name: "no condition yet", agent: Agent{Pending: true}, active: true},
+		{name: "self-test pending", agent: Agent{Pending: true, Gateway: &v1.Gateway{SlotID: "eni-1"}}, active: true},
+		{name: "serving its saved slot", agent: Agent{Serves: "eni-1"}, active: true},
+		{name: "serving another slot", agent: Agent{Serves: "eni-9"}},
+		{name: "self-test failed", agent: Agent{Gateway: &v1.Gateway{SlotID: "eni-1"}}},
+		{name: "not assigned", agent: Agent{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := in
+			in.Nodes = slices.Clone(in.Nodes)
+			a := tc.agent
+			a.Pod, a.Ready = "agent-n1-new", true
+			in.Nodes[0].Agent, in.Nodes[0].AgentGone = &a, time.Time{}
+			p := Compute(in)
+			if len(p.Detaches)+len(p.Attaches) != 0 {
+				t.Fatalf("the restarted agent lost its slot: %+v %+v", p.Detaches, p.Attaches)
+			}
+			if p.Agents["agent-n1-new"].Gateway.SlotID != "eni-1" {
+				t.Fatalf("the restarted agent is not assigned its slot: %+v", p.Agents)
+			}
+			got := state(t, p, "default", "eni-1").State
+			if (got == v1.SlotActive) != tc.active {
+				t.Fatalf("state %s, want active %v", got, tc.active)
+			}
+		})
+	}
+
 	// Never served: still kept, but not reported active.
 	in.Nodes[0].LastServed = ""
 	expect(t, state(t, Compute(in), "default", "eni-1"), v1.SlotAttaching, "restarting")

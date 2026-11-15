@@ -378,6 +378,14 @@ func TestAgentRolloutKeepsTheSlot(t *testing.T) {
 	if h.cloud.instanceOf("eni-1") != "i-ro-1" || h.pod("agent-ro-1-new").Annotations[v1.AnnotationGateway] == "" {
 		t.Fatal("the replacement agent did not take over the slot")
 	}
+	// While it comes up on the slot, the slot stays Active: the gateway's
+	// kernel state carried its traffic throughout.
+	for range 2 {
+		if s := status(); s.State != v1.SlotActive || s.Node != "ro-1" {
+			t.Fatalf("status while the replacement comes up %+v", s)
+		}
+		h.reconcile()
+	}
 
 	// An agent that does not come back within the grace loses the slot.
 	if err := k8s.Delete(h.ctx, repl); err != nil {

@@ -291,9 +291,10 @@ func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods [
 		was := r.agents[n.Name]
 		if p := byNode[n.Name]; p != nil {
 			node.Agent = agentOf(p)
-			if node.Agent.GatewayReady {
-				was.served = node.Agent.Gateway.SlotID
-			} else if node.Agent.Gateway == nil {
+			switch a := node.Agent; {
+			case a.GatewayReady:
+				was.served = a.Gateway.SlotID
+			case a.Gateway == nil && a.Serves == "" && !a.Pending:
 				was.served = ""
 			}
 			was.gone = time.Time{}
@@ -309,10 +310,16 @@ func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods [
 }
 
 func agentOf(p *corev1.Pod) *Agent {
-	a := &Agent{Pod: p.Name}
+	a := &Agent{Pod: p.Name, Pending: true}
 	for _, c := range p.Status.Conditions {
-		if c.Type == corev1.ContainersReady {
+		switch c.Type {
+		case corev1.ContainersReady:
 			a.Ready = c.Status == corev1.ConditionTrue
+		case v1.ConditionGatewayReady:
+			a.Pending = c.Reason == v1.ReasonSelfTestPending
+			if slot, ok := strings.CutPrefix(c.Message, v1.GatewayReadyMessage("")); ok && c.Status == corev1.ConditionTrue {
+				a.Serves = slot
+			}
 		}
 	}
 	if raw := p.Annotations[v1.AnnotationGateway]; raw != "" {

@@ -67,6 +67,13 @@ type Agent struct {
 	GatewayReady bool
 	// Gateway is the assignment currently written on the pod, if any.
 	Gateway *v1.Gateway
+	// Serves is the slot the agent reports serving, whatever is written on
+	// the pod: a restarted agent serves its saved assignment before the
+	// controller writes it again.
+	Serves string
+	// Pending reports whether the agent has yet to say whether it serves:
+	// no gateway condition yet, or waiting for its first self-test.
+	Pending bool
 	// DrainStarted is when the controller asked this gateway to drain.
 	DrainStarted time.Time
 }
@@ -297,7 +304,7 @@ func (pp *planner) run(slots []cloud.Slot, owners map[string][]string) []v1.Slot
 			capacity[zone]++
 			pp.serve(s, node)
 			reason := strings.Join(pp.problems(s, owners), "; ")
-			if node.Agent.GatewayReady && node.Agent.Gateway != nil && node.Agent.Gateway.SlotID == s.ID {
+			if node.Agent.GatewayReady && node.Agent.Gateway != nil && node.Agent.Gateway.SlotID == s.ID || resuming(node, s.ID) {
 				set(s, v1.SlotActive, node.Name, reason)
 			} else {
 				set(s, v1.SlotAttaching, node.Name, joinReason("waiting for the gateway to report ready", reason))
@@ -408,6 +415,14 @@ func (pp *planner) requeue(after time.Duration) {
 
 func (pp *planner) detach(s cloud.Slot, node string, force bool, reason string) {
 	pp.plan.Detaches = append(pp.plan.Detaches, Detach{Slot: s.ID, Node: node, Force: force, Reason: reason})
+}
+
+// resuming reports whether n's agent restarted while serving slot and is
+// coming back up on it. Its kernel state carried the traffic throughout, so
+// the slot stays Active unless the new agent reports otherwise.
+func resuming(n *Node, slot string) bool {
+	a := n.Agent
+	return n.LastServed == slot && (a.Gateway == nil || a.Gateway.SlotID == slot) && (a.Serves == slot || a.Serves == "" && a.Pending)
 }
 
 func (pp *planner) serve(s cloud.Slot, n *Node) {

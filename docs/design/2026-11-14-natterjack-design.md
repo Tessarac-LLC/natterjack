@@ -283,7 +283,8 @@ while the agent is gone. The controller keeps a slot on its node for a minute
 while that node's agent pod is missing or terminating and the node is ready
 and not being drained. The new agent reads the assignment its predecessor
 saved under `/run/natterjack` and serves it until the controller writes the
-assignment on the new pod. Every other agent keeps the gateway in use for up
+assignment on the new pod. The pool status keeps the slot `Active` while the
+new agent comes up on it, until it reports anything else. Every other agent keeps the gateway in use for up
 to 90 seconds while its new agent starts on the same slot, ending the hold as
 soon as the new agent reports a failure, the slot is drained or reassigned, or
 the node goes. Probes still decide liveness throughout. A restart longer than
