@@ -244,14 +244,27 @@ func echoWith(t *testing.T, seen <-chan string, payload string) string {
 // was answered.
 func probeOnce(t *testing.T, cfg Config, mark uint32) bool {
 	t.Helper()
+	return probeWith(t, cfg, mark, "NJP100000001")
+}
+
+// probeWith sends msg to the gateway's probe port and reports whether it
+// came back unchanged.
+func probeWith(t *testing.T, cfg Config, mark uint32, msg string) bool {
+	t.Helper()
 	c, err := DialProbe(t.Context(), mark, netip.AddrPortFrom(cfg.GatewayAddr(), cfg.ProbePort))
 	must(t, err)
 	defer func() { _ = c.Close() }()
-	_, _ = c.Write([]byte("NJP100000001"))
+	_, _ = c.Write([]byte(msg))
 	_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 	b := make([]byte, 32)
 	n, err := c.Read(b)
-	return err == nil && n == 12
+	return err == nil && string(b[:n]) == msg
+}
+
+// gwDo runs fn in dp's gateway namespace.
+func gwDo(t *testing.T, dp *Dataplane, fn func() error) {
+	t.Helper()
+	must(t, dp.Gateway().Do(fn))
 }
 
 func nodeAddr(t *testing.T) netip.Addr {
@@ -343,17 +356,57 @@ func TestSingleNodeGateway(t *testing.T) {
 	// The self-test, dialed from the gateway namespace, sees the slot.
 	must(t, agent.SelfTest(t.Context(), dp.DialGateway, "http://"+internet+"/", netip.MustParseAddr(slotIP)))
 
-	// Probes through the local gateway are answered only while it serves.
-	pc, err := dp.ListenProbe(t.Context())
-	must(t, err)
-	responder := agent.NewResponder(pc)
-	defer func() { _ = responder.Close() }()
-	if probeOnce(t, cfg, firstMark) {
-		t.Fatal("a gateway that is not serving answered a probe")
-	}
-	responder.SetServing(true)
+	// Probes through the local gateway are answered, in the kernel.
 	if !probeOnce(t, cfg, firstMark) {
 		t.Fatalf("the local gateway did not answer a probe\n%s", nftDump())
+	}
+	for _, bad := range []string{"NJP1short", "XXXX12345678", "NJP1123456789"} {
+		if probeWith(t, cfg, firstMark, bad) {
+			t.Fatalf("the responder answered %q", bad)
+		}
+	}
+	// With the agent gone, the gateway still answers; a new agent takes
+	// over without a gap.
+	dp.closeResponder()
+	if !probeOnce(t, cfg, firstMark) {
+		t.Fatal("probes went unanswered once the agent let go of the responder")
+	}
+	next, err := New(cfg, testr.New(t))
+	must(t, err)
+	_, err = next.Apply(want)
+	must(t, err)
+	next.closeResponder()
+	if !probeOnce(t, cfg, firstMark) {
+		t.Fatal("probes went unanswered after a new agent took over")
+	}
+	// Nor while the slot does not serve, nor to a sender that is not a node.
+	for name, w := range map[string]func(*agent.Desired){
+		"a slot that does not serve": func(w *agent.Desired) { g := *w.Gateway; g.MAC = "02:00:00:00:99:99"; w.Gateway = &g },
+		"a sender that is not a node": func(w *agent.Desired) { w.Nodes = []netip.Addr{netip.MustParseAddr("192.0.2.77")} },
+	} {
+		other := *want
+		w(&other)
+		_, err = dp.Apply(&other)
+		must(t, err)
+		if probeOnce(t, cfg, firstMark) {
+			t.Fatalf("the responder answered %s", name)
+		}
+		_, err = dp.Apply(want)
+		must(t, err)
+		if !probeOnce(t, cfg, firstMark) {
+			t.Fatalf("probes went unanswered after %s was put right", name)
+		}
+	}
+	// A slot that can no longer route out is not vouched for, agent or
+	// not; the next Apply puts the route back.
+	gwDo(t, dp, func() error { return netlink.RouteDel(&netlink.Route{Dst: defaultDst()}) })
+	if probeOnce(t, cfg, firstMark) {
+		t.Fatal("a gateway without a route out answered a probe")
+	}
+	_, err = dp.Apply(want)
+	must(t, err)
+	if !probeOnce(t, cfg, firstMark) {
+		t.Fatal("probes went unanswered after the route came back")
 	}
 
 	// Nothing on the internet side reaches the node, its pods or the
@@ -583,11 +636,6 @@ func TestTunnel(t *testing.T) {
 				t.Fatalf("%s peers may send from %v; want only the source node's address", WireGuardLink, got)
 			}
 		}
-		pc, err := dp.ListenProbe(t.Context())
-		must(t, err)
-		responder := agent.NewResponder(pc)
-		defer func() { _ = responder.Close() }()
-		responder.SetServing(true)
 		signal("gateway-ready")
 		await("source-done")
 		await("outsider-done")

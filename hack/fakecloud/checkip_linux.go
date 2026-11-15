@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"time"
 )
 
@@ -41,6 +42,49 @@ func whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(ap.Addr().Unmap().String() + "\n")) // #nosec G705 -- an IP address, served as plain text
+}
+
+// stream answers with the caller's address and a count, a line every
+// 200ms, for up to ?seconds= (default 60) or until the caller goes: one
+// long-lived connection, for checking it survives what happens meanwhile.
+func stream(w http.ResponseWriter, r *http.Request) {
+	ap, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	d := time.Minute
+	if s, err := strconv.Atoi(r.URL.Query().Get("seconds")); err == nil && s > 0 {
+		d = time.Duration(s) * time.Second
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	flush, _ := w.(http.Flusher)
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	end := time.After(d)
+	for n := 0; ; n++ {
+		if _, err := fmt.Fprintf(w, "%s %d\n", ap.Addr().Unmap(), n); err != nil {
+			return
+		}
+		if flush != nil {
+			flush.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-end:
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// internetHandler serves the internet host: /stream, and whoami elsewhere.
+func internetHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream", stream)
+	mux.HandleFunc("/", whoami)
+	return mux
 }
 
 // certificate makes a throwaway CA and a certificate from it for ip. It

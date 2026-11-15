@@ -174,8 +174,10 @@ agent:
     # -- Host port for the agent's liveness and readiness probes.
     health: 9752
   updateStrategy:
-    # -- Agents restarted at once during an upgrade. Each restart moves that
-    # node's gateway role to another node in its zone.
+    # -- Agents restarted at once during an upgrade. A restart does not move
+    # the node's gateway role: the slot, its traffic and the probe responder
+    # stay in the kernel while the new agent starts. A restart that takes
+    # longer than a minute does move it.
     maxUnavailable: 1
   serviceAccount:
     # -- ServiceAccount name. Defaults to `<release>-agent`.

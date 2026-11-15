@@ -62,6 +62,11 @@ const terminationHandlerTaintPrefix = "aws-node-termination-handler/"
 // avoidFor is how long a node that refused an attach is skipped.
 const avoidFor = 10 * time.Minute
 
+// AgentRestartGrace is how long a slot stays on a node whose agent pod is
+// gone, so that a rolling update of the agents moves no slot. A node that
+// fails goes not ready and loses its slot at once.
+const AgentRestartGrace = 60 * time.Second
+
 // Reconciler assigns every pool's slots to nodes. It runs as one reconcile
 // for all pools, because a node holds at most one slot whatever the pool.
 type Reconciler struct {
@@ -84,6 +89,14 @@ type Reconciler struct {
 	mu     sync.Mutex
 	avoid  map[string]avoided
 	strays string
+	// agents remembers, per node, the slot its agent last served and since
+	// when it has had no running agent.
+	agents map[string]agentSeen
+}
+
+type agentSeen struct {
+	served string
+	gone   time.Time
 }
 
 type avoided struct {
@@ -159,8 +172,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 	}
 	r.Health.Set(nil)
 
-	nodes, agents := r.observe(ctx, nodeList.Items, pods.Items)
-	in := Input{Slots: slots, Nodes: nodes, Now: now, Avoid: r.avoided(now)}
+	nodes, agents := r.observe(ctx, nodeList.Items, pods.Items, now)
+	in := Input{Slots: slots, Nodes: nodes, Now: now, Avoid: r.avoided(now), AgentGrace: AgentRestartGrace}
 	for i := range pools.Items {
 		in.Pools = append(in.Pools, Pool{Name: pools.Items[i].Name, Spec: pools.Items[i].Spec})
 	}
@@ -203,6 +216,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		r.event(poolsByName, plan, a.Slot, corev1.EventTypeNormal, "SlotAttached", "Attach", "attached slot %s to node %s", a.Slot, a.Node)
 	}
 	for _, name := range slices.Sorted(maps.Keys(agents)) {
+		// A terminating agent keeps what it has: clearing it could make
+		// it tear down the gateway its replacement takes over.
+		if agents[name].DeletionTimestamp != nil {
+			continue
+		}
 		var want *AgentWant
 		if w, ok := plan.Agents[name]; ok {
 			want = &w
@@ -239,7 +257,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 // observe turns nodes and agent pods into the planner's view. Nodes the
 // provider cannot map to an instance (for example, serverless nodes) are
 // left out: they can neither hold a slot nor need one.
-func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods []corev1.Pod) ([]Node, map[string]*corev1.Pod) {
+func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods []corev1.Pod, now time.Time) ([]Node, map[string]*corev1.Pod) {
 	log := logf.FromContext(ctx)
 	agents := map[string]*corev1.Pod{}
 	byNode := map[string]*corev1.Pod{}
@@ -255,6 +273,9 @@ func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods [
 		}
 	}
 
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seen := map[string]agentSeen{}
 	var nodes []Node
 	for i := range nodeList {
 		n := &nodeList[i]
@@ -267,11 +288,23 @@ func (r *Reconciler) observe(ctx context.Context, nodeList []corev1.Node, pods [
 			Name: n.Name, Instance: inst.ID, Zone: inst.Zone, Created: n.CreationTimestamp.Time,
 			Labels: n.Labels, Taints: n.Spec.Taints, Ready: nodeReady(n), Disruption: disruption(n),
 		}
+		was := r.agents[n.Name]
 		if p := byNode[n.Name]; p != nil {
 			node.Agent = agentOf(p)
+			if node.Agent.GatewayReady {
+				was.served = node.Agent.Gateway.SlotID
+			} else if node.Agent.Gateway == nil {
+				was.served = ""
+			}
+			was.gone = time.Time{}
+		} else if was.gone.IsZero() {
+			was.gone = now
 		}
+		node.AgentGone, node.LastServed = was.gone, was.served
+		seen[n.Name] = was
 		nodes = append(nodes, node)
 	}
+	r.agents = seen
 	return nodes, agents
 }
 

@@ -49,11 +49,13 @@ generate: $(CONTROLLER_GEN) bpf ## Regenerate deepcopy code, CRDs and the eBPF o
 	cp config/crd/*.yaml charts/natterjack/files/crds/
 
 .PHONY: bpf
-bpf: ## Build the eBPF fast path's object (needs Docker)
+bpf: ## Build the eBPF objects: the fast path and the probe responder (needs Docker)
 	docker run --rm --platform linux/amd64 --network none -u "$$(id -u):$$(id -g)" \
 		-v "$(CURDIR)/$(BPF_DIR):/src" -w /src $(BPF_BUILDER) sh -ec '\
-		clang-22 -O2 -g -Wall -Werror -target bpfel -mcpu=v3 -I/usr/include/x86_64-linux-gnu -c steer.c -o steer_bpfel.o; \
-		llvm-strip-22 -g steer_bpfel.o'
+		for p in steer respond; do \
+			clang-22 -O2 -g -Wall -Werror -target bpfel -mcpu=v3 -I/usr/include/x86_64-linux-gnu -c $$p.c -o $${p}_bpfel.o; \
+			llvm-strip-22 -g $${p}_bpfel.o; \
+		done'
 
 GENERATED := api config charts/natterjack/files $(BPF_DIR)
 

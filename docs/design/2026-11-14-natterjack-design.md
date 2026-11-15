@@ -252,7 +252,10 @@ the links, maps and `njd0`. The agent reports its mode as
   cluster nodes. A probe is 12 bytes, a magic value and a sequence number;
   the responder ignores anything else and answers only while it serves a
   slot, including while draining, so draining gateways keep their existing
-  flows. Default interval 100 ms, three misses to declare down (about
+  flows. The responder is a tc program on that link, so it keeps answering
+  while the agent restarts; it also checks that the gateway namespace still
+  routes out, so a slot whose interface has gone stops answering with no
+  agent running. Default interval 100 ms, three misses to declare down (about
   300 ms), configurable per pool. One reply brings a gateway back.
 - A gateway declared down is removed from that node's hash table immediately.
   Conntrack entries marked for it are flushed so the affected flows re-hash on
@@ -273,6 +276,18 @@ false with reason `Draining`, agents stop sending new flows to it, existing flow
 window (default 60 s), then the controller detaches the slot and attaches it
 to another eligible node in the same zone. Spot interruption notices start the
 same sequence early.
+
+An agent restart, including a rolling upgrade, moves nothing. The slot, its
+routes and rules, the tunnel and the probe responder are kernel state and stay
+while the agent is gone. The controller keeps a slot on its node for a minute
+while that node's agent pod is missing or terminating and the node is ready
+and not being drained. The new agent reads the assignment its predecessor
+saved under `/run/natterjack` and serves it until the controller writes the
+assignment on the new pod. Every other agent keeps the gateway in use for up
+to 90 seconds while its new agent starts on the same slot, ending the hold as
+soon as the new agent reports a failure, the slot is drained or reassigned, or
+the node goes. Probes still decide liveness throughout. A restart longer than
+a minute moves the slot as a failure would.
 
 ## 5. Egress slots per cloud
 

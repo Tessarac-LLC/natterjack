@@ -18,19 +18,21 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func responder(t *testing.T) (*Responder, netip.AddrPort) {
+func responder(t *testing.T) (*echoer, netip.AddrPort) {
 	t.Helper()
 	c, err := (&net.ListenConfig{}).ListenPacket(t.Context(), "udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := NewResponder(c)
+	r := newEchoer(c)
 	t.Cleanup(func() { _ = r.Close() })
 	return r, c.LocalAddr().(*net.UDPAddr).AddrPort()
 }
@@ -84,26 +86,41 @@ func TestProberDetectsAndRecovers(t *testing.T) {
 	}
 }
 
-func TestResponderIgnoresOtherDatagrams(t *testing.T) {
-	r, addr := responder(t)
-	r.SetServing(true)
-	c, err := (&net.Dialer{}).DialContext(t.Context(), "udp4", addr.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	for _, msg := range []string{"NJP1short", "XXXX12345678", "NJP1123456789"} {
-		if _, err := c.Write([]byte(msg)); err != nil {
-			t.Fatal(err)
+// echoer answers probes like a gateway, in user space.
+type echoer struct {
+	conn    net.PacketConn
+	serving atomic.Bool
+	done    chan struct{}
+}
+
+func newEchoer(conn net.PacketConn) *echoer {
+	r := &echoer{conn: conn, done: make(chan struct{})}
+	go r.run()
+	return r
+}
+
+func (r *echoer) SetServing(v bool) { r.serving.Store(v) }
+
+func (r *echoer) Close() error {
+	err := r.conn.Close()
+	<-r.done
+	return err //nolint:wrapcheck // closing a socket
+}
+
+func (r *echoer) run() {
+	defer close(r.done)
+	var b [probeLen + 1]byte
+	for {
+		n, from, err := r.conn.ReadFrom(b[:])
+		if errors.Is(err, net.ErrClosed) {
+			return
 		}
-	}
-	if _, err := c.Write([]byte("NJP112345678")); err != nil {
-		t.Fatal(err)
-	}
-	_ = c.SetReadDeadline(time.Now().Add(time.Second))
-	b := make([]byte, 64)
-	n, err := c.Read(b)
-	if err != nil || string(b[:n]) != "NJP112345678" {
-		t.Fatalf("first reply %q, %v; want only the well-formed probe echoed", b[:n], err)
+		if err != nil {
+			continue
+		}
+		if n != probeLen || string(b[:len(probeMagic)]) != probeMagic || !r.serving.Load() {
+			continue
+		}
+		_, _ = r.conn.WriteTo(b[:n], from)
 	}
 }

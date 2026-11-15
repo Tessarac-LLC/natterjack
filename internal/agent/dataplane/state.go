@@ -26,7 +26,10 @@ import (
 	"path/filepath"
 )
 
-const marksFile = "marks.json"
+const (
+	marksFile = "marks.json"
+	roleFile  = "gateway.json"
+)
 
 // LoadMarks reads the mark table the last Apply saved. Conntrack entries
 // carry these marks, so an agent restart must reuse them; a reboot empties
@@ -52,20 +55,53 @@ func SaveMarks(dir string, m map[uint32]netip.Addr) error {
 	if err != nil {
 		return fmt.Errorf("encode mark table: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, marksFile+".*")
-	if err != nil {
+	if err := writeAtomic(dir, marksFile, b); err != nil {
 		return fmt.Errorf("save mark table: %w", err)
+	}
+	return nil
+}
+
+// LoadRole reads the gateway assignment the agent last served, as the
+// controller wrote it, or "" when it served none.
+func LoadRole(dir string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, roleFile)) //nolint:gosec // under the configured state directory
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read gateway assignment: %w", err)
+	}
+	return string(b), nil
+}
+
+// SaveRole records the gateway assignment being served, so that the next
+// agent on the node keeps serving it while the controller catches up. An
+// empty role removes the record.
+func SaveRole(dir, role string) error {
+	if role == "" {
+		if err := os.Remove(filepath.Join(dir, roleFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("remove gateway assignment: %w", err)
+		}
+		return nil
+	}
+	if err := writeAtomic(dir, roleFile, []byte(role)); err != nil {
+		return fmt.Errorf("save gateway assignment: %w", err)
+	}
+	return nil
+}
+
+func writeAtomic(dir, name string, b []byte) error {
+	tmp, err := os.CreateTemp(dir, name+".*")
+	if err != nil {
+		return err //nolint:wrapcheck // wrapped by the callers
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }() // fails harmlessly after the rename
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("save mark table: %w", err)
+		return err //nolint:wrapcheck // wrapped by the callers
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("save mark table: %w", err)
+		return err //nolint:wrapcheck // wrapped by the callers
 	}
-	if err := os.Rename(tmp.Name(), filepath.Join(dir, marksFile)); err != nil {
-		return fmt.Errorf("save mark table: %w", err)
-	}
-	return nil
+	return os.Rename(tmp.Name(), filepath.Join(dir, name)) //nolint:wrapcheck // wrapped by the callers
 }

@@ -88,9 +88,10 @@ func mustMarks(t *testing.T) *Marks {
 	return m
 }
 
-func ringGateways(d Desired, pool string) []netip.Addr {
+// ringGateways are the gateways in the "web" pool's ring.
+func ringGateways(d Desired) []netip.Addr {
 	var out []netip.Addr
-	for _, m := range d.Rings[pool] {
+	for _, m := range d.Rings["web"] {
 		out = append(out, d.Gateways[m])
 	}
 	slices.SortFunc(out, func(a, b netip.Addr) int { return a.Compare(b) })
@@ -102,7 +103,7 @@ func TestRingPrefersOwnZone(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatal(problems)
 	}
-	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.1.10"), ip("10.0.1.11")}) {
+	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.10"), ip("10.0.1.11")}) {
 		t.Fatalf("ring uses %v; want only zone-a gateways", got)
 	}
 	if len(d.Gateways) != 3 {
@@ -118,7 +119,7 @@ func TestRingFallsBackAcrossZones(t *testing.T) {
 	s.Down = map[netip.Addr]bool{ip("10.0.1.10"): true}
 	s.Gateways[1].Annotations[v1.AnnotationDrainStarted] = "2026-11-14T00:00:00Z"
 	d, _ := Compute(s, mustMarks(t))
-	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.2.10")}) {
+	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.2.10")}) {
 		t.Fatalf("ring uses %v; want the other zone when this zone has no live gateway", got)
 	}
 	if len(d.Gateways) != 3 {
@@ -323,7 +324,7 @@ func TestWireGuardGateways(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatal(problems)
 	}
-	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.1.10")}) {
+	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.10")}) {
 		t.Fatalf("ring uses %v; a WireGuard gateway without a key cannot take flows", got)
 	}
 	keys := map[netip.Addr]string{}

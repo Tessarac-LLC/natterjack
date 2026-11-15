@@ -56,7 +56,6 @@ import (
 // Dataplane is the node's kernel state.
 type Dataplane interface {
 	Apply(want *agent.Desired) (dataplane.Status, error)
-	ListenProbe(ctx context.Context) (net.PacketConn, error)
 	DialGateway(ctx context.Context, network, addr string) (net.Conn, error)
 	// WireGuardKey is the node's WireGuard public key.
 	WireGuardKey() string
@@ -73,6 +72,9 @@ const (
 	// serving gateway out of service. One failure is often the test service.
 	selfTestFailures = 3
 	selfTestTimeout  = 10 * time.Second
+	// gatewayHold is how long a gateway stays in use while its agent
+	// restarts; longer than the controller's grace for the same restart.
+	gatewayHold = 90 * time.Second
 )
 
 // Agent reconciles one node. Every change, whatever its source, leads to the
@@ -99,13 +101,23 @@ type Agent struct {
 	// Resync re-asserts the kernel state when nothing changes.
 	Resync time.Duration
 	Log    logr.Logger
+	// StateDir keeps the gateway assignment being served across restarts;
+	// empty keeps nothing.
+	StateDir string
+	// Inherited is the assignment the previous agent on this node served.
+	// This agent serves it until the controller writes an assignment on
+	// this pod, or until InheritUntil, so a restart does not move the slot.
+	Inherited    string
+	InheritUntil time.Time
 
 	wake      chan event.GenericEvent
 	ready     atomic.Bool
 	mu        sync.Mutex
-	responder *agent.Responder
 	test      selfTest
 	problems  string
+	savedRole string
+	roleSaved bool
+	hold      agent.Hold
 }
 
 // selfTest is the self-test of the slot being served.
@@ -171,6 +183,12 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 	// Publish the key first: gateways of an encrypted pool accept this
 	// node's traffic only once they know it.
 	a.setCondition(ctx, s.Self, v1.ConditionWireGuardKey, true, corev1.ConditionTrue, "Published", a.Dataplane.WireGuardKey())
+	s.Self = a.inherit(s.Self)
+	a.hold.For = gatewayHold
+	requeue := a.Resync
+	if left := a.hold.Apply(s, time.Now()); left > 0 && (requeue == 0 || left < requeue) {
+		requeue = left
+	}
 	d, problems := agent.Compute(s, a.Marks)
 	a.report(problems)
 	problemCount.Set(float64(len(problems)))
@@ -184,6 +202,7 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 		return reconcile.Result{}, fmt.Errorf("apply data path: %w", err)
 	}
 	a.ready.Store(true)
+	a.saveRole(s.Self, &d)
 	for _, m := range []dataplane.Mode{dataplane.ModeNFTables, dataplane.ModeEBPF} {
 		v := 0.0
 		if st.Mode == m {
@@ -198,19 +217,61 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 
 	status, reason, msg := a.gatewayCondition(d.Gateway, st)
 	a.setCondition(ctx, s.Self, v1.ConditionGatewayReady, d.Gateway != nil, status, reason, msg)
-	return reconcile.Result{RequeueAfter: a.Resync}, nil
+	return reconcile.Result{RequeueAfter: requeue}, nil
 }
 
-// Close stops probing, answering probes and self-testing. The kernel state
-// stays: traffic keeps flowing while the agent restarts.
+// inherit returns self carrying the inherited assignment while this pod has
+// none of its own. The controller keeps the slot on this node while the
+// agent restarts and writes the assignment on the new pod once it is up.
+func (a *Agent) inherit(self *corev1.Pod) *corev1.Pod {
+	if a.Inherited == "" || self == nil {
+		return self
+	}
+	if self.Annotations[v1.AnnotationGateway] != "" || self.Annotations[v1.AnnotationDrainStarted] != "" || !time.Now().Before(a.InheritUntil) {
+		a.Inherited = ""
+		return self
+	}
+	var g v1.Gateway
+	if err := json.Unmarshal([]byte(a.Inherited), &g); err != nil {
+		a.Log.Error(err, "ignoring the saved gateway assignment")
+		a.Inherited = ""
+		return self
+	}
+	p := self.DeepCopy()
+	if p.Labels == nil {
+		p.Labels = map[string]string{}
+	}
+	if p.Annotations == nil {
+		p.Annotations = map[string]string{}
+	}
+	p.Labels[v1.LabelGateway] = "true"
+	p.Labels[v1.LabelPool] = g.Pool
+	p.Annotations[v1.AnnotationGateway] = a.Inherited
+	return p
+}
+
+// saveRole records the assignment just applied, for the next agent.
+func (a *Agent) saveRole(self *corev1.Pod, d *agent.Desired) {
+	role := ""
+	if d.Gateway != nil && self != nil {
+		role = self.Annotations[v1.AnnotationGateway]
+	}
+	if a.StateDir == "" || (a.roleSaved && role == a.savedRole) {
+		return
+	}
+	if err := dataplane.SaveRole(a.StateDir, role); err != nil {
+		a.Log.Error(err, "the next agent on this node may not keep serving the slot")
+		return
+	}
+	a.savedRole, a.roleSaved = role, true
+}
+
+// Close stops probing and self-testing. The kernel state stays, the probe
+// responder with it: traffic keeps flowing while the agent restarts.
 func (a *Agent) Close() {
 	a.Prober.Stop()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.responder != nil {
-		_ = a.responder.Close()
-		a.responder = nil
-	}
 	a.stopSelfTest()
 }
 
@@ -312,23 +373,8 @@ func (a *Agent) serve(role *agent.GatewayRole, st dataplane.Status) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if role == nil {
-		if a.responder != nil {
-			_ = a.responder.Close()
-			a.responder = nil
-		}
 		a.stopSelfTest()
 		return
-	}
-	if a.responder == nil {
-		conn, err := a.Dataplane.ListenProbe(context.Background())
-		if err != nil {
-			a.Log.Error(err, "cannot answer probes; source nodes will treat this gateway as down")
-		} else {
-			a.responder = agent.NewResponder(conn)
-		}
-	}
-	if a.responder != nil {
-		a.responder.SetServing(st.Serving)
 	}
 	if st.Serving {
 		a.startSelfTest(role)
@@ -357,7 +403,7 @@ func (a *Agent) gatewayCondition(role *agent.GatewayRole, st dataplane.Status) (
 	case failures >= selfTestFailures || (!passed && err != nil):
 		return corev1.ConditionFalse, "SelfTestFailed", err.Error()
 	case !passed:
-		return corev1.ConditionFalse, "SelfTestPending", "waiting for the first self-test through the slot"
+		return corev1.ConditionFalse, v1.ReasonSelfTestPending, "waiting for the first self-test through the slot"
 	case role.Draining:
 		return corev1.ConditionFalse, "Draining", "established flows continue; new flows go to other gateways"
 	}

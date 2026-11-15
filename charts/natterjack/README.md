@@ -80,7 +80,7 @@ Kubernetes: `>=1.34.0-0`
 | `agent.steering` | string | `"auto"` | How pod traffic is steered. `nftables` steers in the host's netfilter hooks. `ebpf` also puts tcx programs first on the node's uplinks, for CNIs that move pod traffic past netfilter (Cilium with eBPF host routing, Calico's eBPF data plane); it needs Linux 6.6 or later. `auto` picks `ebpf` on nodes running such a CNI. |
 | `agent.tolerations` | list | `[{"operator":"Exists"}]` | The agent tolerates every taint by default so it runs on every node. |
 | `agent.tunnelPort` | int | `6081` | GENEVE UDP port between nodes. Node security groups must allow it between nodes. |
-| `agent.updateStrategy.maxUnavailable` | int | `1` | Agents restarted at once during an upgrade. Each restart moves that node's gateway role to another node in its zone. |
+| `agent.updateStrategy.maxUnavailable` | int | `1` | Agents restarted at once during an upgrade. A restart does not move the node's gateway role: the slot, its traffic and the probe responder stay in the kernel while the new agent starts. A restart that takes longer than a minute does move it. |
 | `agent.wireguardPort` | int | `51871` | WireGuard UDP port between nodes, for pools with `tunnel: WireGuard`. Must differ from tunnelPort. Node security groups must allow it between nodes. |
 | `clusterName` | string | `""` | Name of this cluster. The controller only uses egress slots tagged `natterjack.io/cluster=<clusterName>`. Required. |
 | `controller.affinity` | object | `{}` | Affinity for controller pods. |
