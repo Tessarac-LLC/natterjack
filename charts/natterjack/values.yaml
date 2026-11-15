@@ -111,6 +111,10 @@ agent:
   # -- GENEVE UDP port between nodes. Node security groups must allow it
   # between nodes.
   tunnelPort: 6081
+  # -- WireGuard UDP port between nodes, for pools with `tunnel: WireGuard`.
+  # Must differ from tunnelPort. Node security groups must allow it between
+  # nodes.
+  wireguardPort: 51871
   # -- UDP port gateways answer probes on, inside their namespace.
   probePort: 6086
   # -- Link-local /30 between the host and gateway namespaces.

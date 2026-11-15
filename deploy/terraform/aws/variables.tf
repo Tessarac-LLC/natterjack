@@ -45,6 +45,22 @@ variable "tunnel_port" {
   description = "UDP port of the agent tunnel. Must match the chart's agent.tunnelPort."
   type        = number
   default     = 6081
+
+  validation {
+    condition     = var.tunnel_port >= 1 && var.tunnel_port <= 65535 && floor(var.tunnel_port) == var.tunnel_port
+    error_message = "tunnel_port must be a port number."
+  }
+}
+
+variable "wireguard_port" {
+  description = "UDP port of the agent WireGuard tunnel, used by pools with tunnel WireGuard. Must match the chart's agent.wireguardPort and differ from tunnel_port."
+  type        = number
+  default     = 51871
+
+  validation {
+    condition     = var.wireguard_port >= 1 && var.wireguard_port <= 65535 && floor(var.wireguard_port) == var.wireguard_port && var.wireguard_port != var.tunnel_port
+    error_message = "wireguard_port must be a port number different from tunnel_port."
+  }
 }
 
 variable "identity" {

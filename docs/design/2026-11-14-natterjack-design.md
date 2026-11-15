@@ -173,6 +173,21 @@ Source node:
    clouds with a 1460 or 1500 byte VPC MTU work without fragmentation. On AWS
    the 9001 byte VPC MTU absorbs the header.
 
+A pool with `tunnel: WireGuard` encrypts the hop from source node to gateway
+(Linux 5.6 or later). Each agent keeps a WireGuard private key in its state
+directory, so it survives agent restarts and a reboot makes a new one, and
+publishes the public key as its pod's `natterjack.io/wireguard-key` condition;
+only the agent on a node can write its own pod's status (section 7.3). A
+source node has one device per encrypted gateway (`njw-<n>`) whose only peer is
+that gateway, at its node IP and `agent.wireguardPort` (UDP 51871 by default);
+the gateway's routing table sends everything to that device. A gateway of an
+encrypted pool listens on `njwg`, whose peers are the cluster's nodes, each
+allowed only its own node IP, so WireGuard itself drops a forged inner source.
+Replies return through `njwg`. A pool set to WireGuard never falls back to
+GENEVE: a gateway that has not published a key gets no new flows, and a
+packet for an encrypted gateway that arrives on `nj0` is dropped (section
+7.2).
+
 Gateway node:
 
 1. The tunnel ends in a dedicated network namespace owned by the agent. The
@@ -298,7 +313,7 @@ firewall allows all inbound traffic, nothing listens at the public IP.
    the private network exists.
 3. Forward only from cluster, VPC and pod ranges (anti-spoofing). Never forward
    from the public side toward private addresses.
-4. Tunnel endpoints accept GENEVE only from cluster node IPs.
+4. Tunnel endpoints accept GENEVE and WireGuard only from cluster node IPs.
 
 Traffic injected into the tunnel meets four independent checks, each tested
 alone by an outsider on the same network that forges tunnel packets and
@@ -314,6 +329,14 @@ probes:
 4. Gateway namespace `forward` and `input` default to drop: only flows from
    cluster nodes through the internal link, and flows routed to the slot by a
    VPC route before agents steer, leave; only replies and node probes enter.
+
+For an encrypted pool, two more rules keep traffic from being downgraded to
+plain GENEVE: the gateway's policy rule sends only packets arriving on `njwg`
+into the gateway namespace, and host `forward` lets a new flow into the
+gateway namespace only from that pool's tunnel device. The privileged tests
+replace a source node's WireGuard route with GENEVE and require that no reply
+comes back, and an outsider with its own WireGuard key gets no handshake and
+no reply.
 
 When the agent is uninstalled (its DaemonSet is gone or being deleted), it
 removes every kernel object it owns before exiting. A gateway namespace that
@@ -332,6 +355,10 @@ interface never returns to the host namespace.
   reads each slot's subnet CIDR so the agent can address the slot and route
   through the subnet's router.
 - Kubernetes RBAC: minimal, listed line by line in the documentation.
+- An agent may change only its own pod's status, enforced by an admission
+  policy on the pod name bound into its ServiceAccount token. Its readiness,
+  self-test and WireGuard key conditions therefore cannot be forged from
+  another node.
 
 ### 7.4 Safety checks before a slot is used
 

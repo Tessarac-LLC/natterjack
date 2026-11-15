@@ -114,6 +114,18 @@ resource "aws_vpc_security_group_ingress_rule" "tunnel" {
   tags                         = var.tags
 }
 
+resource "aws_vpc_security_group_ingress_rule" "wireguard" {
+  count = var.node_security_group_id == null ? 0 : 1
+
+  security_group_id            = var.node_security_group_id
+  referenced_security_group_id = var.node_security_group_id
+  description                  = "Natterjack agent WireGuard tunnel between nodes."
+  ip_protocol                  = "udp"
+  from_port                    = var.wireguard_port
+  to_port                      = var.wireguard_port
+  tags                         = var.tags
+}
+
 # --- Controller identity -----------------------------------------------------
 
 locals {

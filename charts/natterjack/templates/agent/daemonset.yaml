@@ -51,6 +51,7 @@ spec:
             - --route-table-base={{ .Values.agent.routeTableBase }}
             - --rule-priority={{ .Values.agent.rulePriority }}
             - --tunnel-port={{ .Values.agent.tunnelPort }}
+            - --wireguard-port={{ .Values.agent.wireguardPort }}
             - --probe-port={{ .Values.agent.probePort }}
             - --gateway-link={{ .Values.agent.gatewayLink }}
             - --state-dir={{ .Values.agent.stateDir }}
