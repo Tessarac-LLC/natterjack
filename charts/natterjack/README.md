@@ -77,6 +77,7 @@ Kubernetes: `>=1.34.0-0`
 | `agent.selfTest.url` | string | `"https://checkip.amazonaws.com"` | URL that answers with the caller's public IPv4 address. |
 | `agent.serviceAccount.name` | string | `""` | ServiceAccount name. Defaults to `<release>-agent`. |
 | `agent.stateDir` | string | `"/run/natterjack"` | Host directory for the gateway namespace mount and the mark table. It must be on a filesystem a reboot empties (a tmpfs under /run). |
+| `agent.steering` | string | `"auto"` | How pod traffic is steered. `nftables` steers in the host's netfilter hooks. `ebpf` also puts tcx programs first on the node's uplinks, for CNIs that move pod traffic past netfilter (Cilium with eBPF host routing, Calico's eBPF data plane); it needs Linux 6.6 or later. `auto` picks `ebpf` on nodes running such a CNI. |
 | `agent.tolerations` | list | `[{"operator":"Exists"}]` | The agent tolerates every taint by default so it runs on every node. |
 | `agent.tunnelPort` | int | `6081` | GENEVE UDP port between nodes. Node security groups must allow it between nodes. |
 | `agent.updateStrategy.maxUnavailable` | int | `1` | Agents restarted at once during an upgrade. Each restart moves that node's gateway role to another node in its zone. |

@@ -17,6 +17,8 @@ limitations under the License.
 package daemon
 
 import (
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
@@ -42,8 +44,17 @@ var (
 		Name: "natterjack_agent_self_test_failures_total",
 		Help: "Failed self-tests through this node's slot.",
 	})
+	steeringMode = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "natterjack_agent_steering_mode",
+		Help: "1 for how this node steers pod traffic: nftables, or ebpf for the fast path on its uplinks.",
+	}, []string{"mode"})
+	divertedPackets atomic.Uint64
+	divertedTotal   = prometheus.NewCounterFunc(prometheus.CounterOpts{
+		Name: "natterjack_agent_ebpf_diverted_packets_total",
+		Help: "Pod packets the eBPF fast path sent to be steered.",
+	}, func() float64 { return float64(divertedPackets.Load()) })
 )
 
 func init() {
-	metrics.Registry.MustRegister(gatewaysDown, gatewayServing, problemCount, applyFailures, selfTestFailuresTotal)
+	metrics.Registry.MustRegister(gatewaysDown, gatewayServing, problemCount, applyFailures, selfTestFailuresTotal, steeringMode, divertedTotal)
 }

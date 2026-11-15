@@ -29,6 +29,12 @@ public address.
 - **Fast failover, slow repair.** Losing a gateway moves its flows to the
   others in under a second. Re-attaching the orphaned slot to another node
   happens in the background.
+- **Works under eBPF data planes.** With Cilium's eBPF host routing or
+  Calico's eBPF data plane, pod traffic skips the node's netfilter hooks. The
+  agent then puts small eBPF programs first on the node's uplinks that hand
+  that traffic back to the same steering rules. It picks this mode on its own;
+  set `agent.steering` to `nftables` or `ebpf` to choose. The eBPF mode needs
+  Linux 6.6 or later.
 - **Infrastructure-as-code owns the infrastructure.** Natterjack never
   creates, retags or deletes cloud resources. It only moves the attachment of
   interfaces that already carry its tags.

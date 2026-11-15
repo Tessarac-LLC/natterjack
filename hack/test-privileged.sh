@@ -2,8 +2,9 @@
 # Runs the data path tests that change a kernel, each in throwaway
 # privileged containers so the machine running them is left alone.
 #   1. One node: a gateway serving its own pods and itself.
-#   2. Three containers on one network: a gateway node, a source node that
-#      steers through the GENEVE tunnel, and an outsider that tries to.
+#   2. The eBPF fast path, with a CNI that bypasses netfilter emulated.
+#   3. Three containers on one network: a gateway node, a source node that
+#      steers through the tunnel (GENEVE, then WireGuard), and an outsider that tries to.
 set -euo pipefail
 
 image="alpine:3.22@sha256:49340b346798875b5592e5d420241f2f9cfba5f47e62ebb1446a1b34734e898f"
@@ -38,6 +39,10 @@ docker network create --subnet "$subnet" "$net" >/dev/null
 
 echo "--- one node"
 run "$net-gateway" "" -- -test.run 'TestSingleNodeGateway|TestStaleFlowsAreFlushed'
+docker rm "$net-gateway" >/dev/null
+
+echo "--- eBPF fast path"
+run "$net-gateway" "" -- -test.run 'TestSteerPrograms|TestEBPFFastPath|TestRemoveEBPFReadOnly'
 docker rm "$net-gateway" >/dev/null
 
 status=0

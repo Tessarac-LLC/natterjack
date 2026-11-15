@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.18
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.347.0
 	github.com/aws/smithy-go v1.28.9
+	github.com/cilium/ebpf v0.22.0
 	github.com/go-logr/logr v1.4.4
 	github.com/google/nftables v0.3.0
 	github.com/prometheus/client_golang v1.24.0

@@ -205,11 +205,42 @@ cloud's per-instance internet bandwidth and per flow by the cloud's per-flow
 limit (published in `docs/reference/bandwidth.md`). Customers add capacity by
 tagging more slots.
 
-An eBPF fast path (tc programs in C, built with `bpf2go` and loaded by the
-agent through `cilium/ebpf`) implements the same steering for data planes that
-bypass netfilter: Cilium with eBPF host routing or kube-proxy replacement, and
-Calico in eBPF mode. The agent detects the data plane and selects the mode;
-the mode can be forced in values.
+An eBPF fast path covers data planes that move pod traffic from the pod's
+device straight to the node's uplink, so the host's netfilter hooks never see
+it: Cilium with eBPF host routing, and Calico's eBPF data plane. It does not
+reimplement the steering. Two tc programs (C in
+`internal/agent/dataplane/bpf/steer.c`, built reproducibly by `make bpf` in a
+pinned builder image, embedded in the agent and loaded through `cilium/ebpf`)
+sit first on every uplink, the device with the node's address and every
+device a default route uses, through tcx links anchored at the head of each
+hook, ahead of the CNI's own programs; tcx needs Linux 6.6 or later.
+
+- The egress program takes a packet from a steered pod to a destination that
+  is not excluded, rewrites its destination MAC and redirects it into the
+  ingress of a dummy device, `njd0`. The packet re-enters the host's stack
+  there, and the same nftables rules as in nftables mode pick its gateway,
+  translate it and send it into the tunnel. A packet arriving from `njd0`
+  that nftables left unsteered (a per-steer exclusion, no live gateway) goes
+  out as it is, so nothing loops.
+- Replies to connections that came in from outside reach the pod the same
+  way and would look new to the host's conntrack. The ingress program records
+  each connection that comes in to a steered pod, from a peer that is not
+  excluded, in an LRU map, and the egress program leaves its replies alone.
+- The maps (steered pods, excluded prefixes as an LPM trie, inbound
+  connections, a diverted-packet counter) and the links are pinned under
+  `/sys/fs/bpf/natterjack`, so the fast path keeps working while the agent
+  restarts. Each Apply checks the links are still first on their hooks,
+  updates them in place with the new programs, or attaches anew at the head
+  when a CNI that started later put its program ahead; links of devices that
+  are no longer uplinks are removed. Maps from an incompatible earlier
+  version are replaced.
+
+`--steering=auto`, the default, selects eBPF on nodes with a `cilium_host`,
+`bpfin.cali` or `bpfout.cali` device; the chart's `agent.steering` forces
+`nftables` or `ebpf`. Switching to nftables mode, and uninstalling, removes
+the links, maps and `njd0`. The agent reports its mode as
+`natterjack_agent_steering_mode` and the diverted count as
+`natterjack_agent_ebpf_diverted_packets_total`.
 
 ### 4.4 Failure detection and failover
 
