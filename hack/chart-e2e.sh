@@ -124,6 +124,8 @@ deny "$agent_sa" create pods/exec "$ns"
 deny "$agent_sa" patch nodes
 deny "$agent_sa" patch egresspools.natterjack.io
 deny "$agent_sa" update daemonsets.apps "$ns"
+allow "$agent_sa" watch daemonsets.apps "$ns"
+deny "$agent_sa" watch daemonsets.apps
 allow "$controller_sa" patch pods "$ns"
 allow "$controller_sa" patch egresspools.natterjack.io/status
 deny "$controller_sa" patch pods default
@@ -208,14 +210,26 @@ step "uninstall removes the data path and keeps the CRDs"
 for n in $(nodes); do
 	docker exec "$n" ip link show nj0 >/dev/null 2>&1 || fail "no tunnel link on $n before uninstall"
 done
+# The pods are gone once the uninstall finishes, so their last words are
+# kept from now on.
+for p in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o name); do
+	kubectl -n "$ns" logs -f "$p" >"$work/${p#pod/}.log" 2>&1 &
+done
 helm uninstall "$release" -n "$ns" --wait --timeout 120s
+left() {
+	for f in "$work"/*.log; do
+		printf -- '--- %s\n' "$(basename "$f" .log)" >&2
+		tail -n 20 "$f" >&2
+	done
+	fail "$@"
+}
 for n in $(nodes); do
 	for _ in $(seq 30); do
 		docker exec "$n" ip link show nj0 >/dev/null 2>&1 || break
 		sleep 2
 	done
-	if docker exec "$n" ip link show nj0 >/dev/null 2>&1; then fail "tunnel link left on $n"; fi
-	if docker exec "$n" nft list table ip natterjack >/dev/null 2>&1; then fail "nftables table left on $n"; fi
+	if docker exec "$n" ip link show nj0 >/dev/null 2>&1; then left "tunnel link left on $n"; fi
+	if docker exec "$n" nft list table ip natterjack >/dev/null 2>&1; then left "nftables table left on $n"; fi
 done
 for crd in egresspools egresspolicies clusteregresspolicies; do
 	kubectl get crd "$crd.natterjack.io" >/dev/null || fail "CRD $crd was removed"

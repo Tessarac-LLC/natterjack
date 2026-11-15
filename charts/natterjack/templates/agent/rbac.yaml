@@ -41,9 +41,10 @@ subjects:
     name: {{ include "natterjack.agent.serviceAccount" . }}
     namespace: {{ .Release.Namespace }}
 ---
-# In the release namespace: report the gateway-ready condition on its own pod
-# (the admission policy enforces "own"), and read its DaemonSet at shutdown
-# to tell an uninstall from a restart.
+# In the release namespace: report its data path and gateway conditions on
+# its own pod (the admission policy enforces "own"), and watch its DaemonSet
+# to tell an uninstall from a restart. The watch matters: an uninstall
+# deletes this Role with the DaemonSet, so the agent cannot ask at shutdown.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -57,7 +58,7 @@ rules:
     verbs: [patch]
   - apiGroups: [apps]
     resources: [daemonsets]
-    verbs: [get]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
