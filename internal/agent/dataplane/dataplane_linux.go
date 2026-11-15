@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/nftables"
@@ -55,6 +56,10 @@ type Dataplane struct {
 	gw       *GatewayNS
 	lastMark map[uint32]netip.Addr
 	failed   map[uint32]bool
+
+	// The last read of the host's rules for the agent's mark bits.
+	marksChecked time.Time
+	marksErr     error
 }
 
 // New checks the configuration; nothing is changed until Apply.
@@ -172,7 +177,7 @@ func (d *Dataplane) Apply(want *agent.Desired) (Status, error) {
 	if err := SaveMarks(d.cfg.StateDir, want.Gateways); err != nil {
 		return st, err
 	}
-	return st, nil
+	return st, d.checkMarks(c)
 }
 
 // checkHost refuses hosts where replies from the tunnel would be dropped by

@@ -60,7 +60,7 @@ Kubernetes: `>=1.34.0-0`
 | `agent.image.repository` | string | `"ghcr.io/tessarac-llc/natterjack-agent"` | Agent image repository. |
 | `agent.image.tag` | string | `""` | Defaults to the chart's appVersion. |
 | `agent.logLevel` | string | `"info"` | Log level: debug, info or error. |
-| `agent.markMask` | string | `"0x00ff0000"` | Packet mark bits the agent owns: one contiguous run of at least four bits that no other component on the node uses. |
+| `agent.markMask` | string | `"0x00ff0000"` | Packet mark bits the agent owns: one contiguous run of at least four bits that no other component on the node uses. The default suits the AWS VPC CNI (0x80), kube-proxy (0x4000, 0x8000), kindnet, Cilium and Istio. Calico keeps its marks in 0xffff0000: use "0x00003f00" with it. An agent that finds another component's nftables or policy routing rules using its bits reports its node's data path not ready and names the rule. |
 | `agent.mss` | int | `1460` | TCP MSS ceiling for flows leaving a slot. |
 | `agent.nodeSelector` | object | `{"kubernetes.io/os":"linux"}` | The agent runs on every Linux node. Narrow this only if some nodes never send traffic through Natterjack and never serve as gateways. |
 | `agent.podAnnotations` | object | `{}` | Extra annotations on agent pods. |

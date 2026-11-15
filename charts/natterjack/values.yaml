@@ -108,7 +108,11 @@ agent:
   # link-local and reserved ranges. Add any public ranges your VPC uses.
   excludedCIDRs: []
   # -- Packet mark bits the agent owns: one contiguous run of at least four
-  # bits that no other component on the node uses.
+  # bits that no other component on the node uses. The default suits the AWS
+  # VPC CNI (0x80), kube-proxy (0x4000, 0x8000), kindnet, Cilium and Istio.
+  # Calico keeps its marks in 0xffff0000: use "0x00003f00" with it. An agent
+  # that finds another component's nftables or policy routing rules using
+  # its bits reports its node's data path not ready and names the rule.
   markMask: "0x00ff0000"
   # -- First policy routing table the agent owns.
   routeTableBase: 7700
