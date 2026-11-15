@@ -13,6 +13,9 @@ KIND_VERSION := v0.33.0
 KO_VERSION := v0.19.1
 HELM_DOCS_VERSION := v1.14.2
 CRANE_VERSION := v0.22.1
+# The CNIs the data-path end-to-end test runs under, besides kindnet.
+CILIUM_VERSION := 1.20.4
+CALICO_VERSION := v3.33.0
 # clang and libbpf for the eBPF fast path, pinned so every build of the
 # object is byte for byte the same.
 BPF_BUILDER := ghcr.io/cilium/ebpf-builder:1793281567@sha256:1090b14b4ff21fa58a8d7c4eb449a3a9ad34fd8408e08a14a20a4656817d690b
@@ -79,6 +82,12 @@ chart-docs: chart-tools ## Regenerate the chart README's values reference
 .PHONY: chart-e2e
 chart-e2e: chart-tools ## Install the chart on a throwaway kind cluster and prove it (needs Docker)
 	PATH="$(CHART_PATH)" ./hack/chart-e2e.sh $(KIND_NODE_IMAGE)
+
+CNI ?= kindnet
+
+.PHONY: datapath-e2e
+datapath-e2e: chart-tools ## Send real egress traffic through a kind cluster and a fake EC2 under CNI=kindnet|cilium|calico (needs Docker)
+	PATH="$(CHART_PATH)" CILIUM_VERSION=$(CILIUM_VERSION) CALICO_VERSION=$(CALICO_VERSION) ./hack/datapath-e2e.sh $(CNI) $(KIND_NODE_IMAGE)
 
 .PHONY: chart-tools
 chart-tools: $(HELM) $(KUBECONFORM) $(KIND) $(KO) $(HELM_DOCS) $(CRANE)
