@@ -241,6 +241,11 @@ func (d *Dataplane) ensureTunnel(mtu int) (netlink.Link, error) {
 		if l, err = netlink.LinkByName(TunnelLink); err != nil {
 			return nil, fmt.Errorf("find %s: %w", TunnelLink, err)
 		}
+		// Kernels before 5.18 drop the attribute and make an Ethernet device.
+		if g, ok := l.(*netlink.Geneve); !ok || !g.InnerProtoInherit {
+			_ = netlink.LinkDel(l)
+			return nil, fmt.Errorf("create %s: this kernel's GENEVE devices cannot carry IP packets; the agent needs Linux 5.18 or later", TunnelLink)
+		}
 	}
 	// The kernel caps a collect-metadata GENEVE device at the IPv6 overhead;
 	// an underlay with 64 KiB frames, such as a loopback, exceeds it.
