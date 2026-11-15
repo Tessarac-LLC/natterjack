@@ -174,15 +174,17 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 	st, err := a.Dataplane.Apply(&d)
 	if err != nil {
 		applyFailures.Inc()
-		a.setCondition(ctx, s.Self, d.Gateway, corev1.ConditionFalse, "ApplyFailed", err.Error())
+		a.setCondition(ctx, s.Self, v1.ConditionDataplaneReady, true, corev1.ConditionFalse, "ApplyFailed", err.Error())
+		a.setCondition(ctx, s.Self, v1.ConditionGatewayReady, d.Gateway != nil, corev1.ConditionFalse, "ApplyFailed", err.Error())
 		return reconcile.Result{}, fmt.Errorf("apply data path: %w", err)
 	}
 	a.ready.Store(true)
+	a.setCondition(ctx, s.Self, v1.ConditionDataplaneReady, true, corev1.ConditionTrue, "Applied", "the node's data path is applied")
 	a.Prober.Update(a.targets(s, &d, pools))
 	a.serve(d.Gateway, st)
 
 	status, reason, msg := a.gatewayCondition(d.Gateway, st)
-	a.setCondition(ctx, s.Self, d.Gateway, status, reason, msg)
+	a.setCondition(ctx, s.Self, v1.ConditionGatewayReady, d.Gateway != nil, status, reason, msg)
 	return reconcile.Result{RequeueAfter: a.Resync}, nil
 }
 
@@ -344,38 +346,39 @@ func (a *Agent) gatewayCondition(role *agent.GatewayRole, st dataplane.Status) (
 	return corev1.ConditionTrue, "Serving", v1.GatewayReadyMessage(role.SlotID)
 }
 
-// setCondition patches the gateway readiness condition when it changes.
-// Agents that never served a slot leave their pod alone.
-func (a *Agent) setCondition(ctx context.Context, self *corev1.Pod, role *agent.GatewayRole, status corev1.ConditionStatus, reason, msg string) {
+// setCondition patches one of the agent's pod conditions when it changes.
+// Unless create is set, a condition the pod does not carry is left out, so
+// agents that never served a slot have no gateway condition.
+func (a *Agent) setCondition(ctx context.Context, self *corev1.Pod, typ corev1.PodConditionType, create bool, status corev1.ConditionStatus, reason, msg string) {
 	if self == nil {
 		return
 	}
 	var cur *corev1.PodCondition
 	for i := range self.Status.Conditions {
-		if self.Status.Conditions[i].Type == v1.ConditionGatewayReady {
+		if self.Status.Conditions[i].Type == typ {
 			cur = &self.Status.Conditions[i]
 		}
 	}
-	if cur == nil && role == nil {
+	if cur == nil && !create {
 		return
 	}
 	if cur != nil && cur.Status == status && cur.Reason == reason && cur.Message == msg {
 		return
 	}
-	want := corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.Now()}
+	want := corev1.PodCondition{Type: typ, Status: status, Reason: reason, Message: msg, LastTransitionTime: metav1.Now()}
 	if cur != nil && cur.Status == status {
 		want.LastTransitionTime = cur.LastTransitionTime
 	}
 	raw, err := json.Marshal(map[string]any{"status": map[string]any{"conditions": []corev1.PodCondition{want}}})
 	if err != nil {
-		a.Log.Error(err, "encode readiness")
+		a.Log.Error(err, "encode condition", "condition", typ)
 		return
 	}
 	if err := a.Client.Status().Patch(ctx, self, client.RawPatch(types.StrategicMergePatchType, raw)); err != nil {
-		a.Log.Error(err, "report gateway readiness", "ready", status, "reason", reason)
+		a.Log.Error(err, "report condition", "condition", typ, "status", status, "reason", reason)
 		return
 	}
-	a.Log.Info("gateway readiness", "ready", status, "reason", reason, "message", msg)
+	a.Log.Info("condition", "condition", typ, "status", status, "reason", reason, "message", msg)
 }
 
 // startSelfTest tests the slot now and every interval, until the slot or

@@ -27,6 +27,8 @@ renders=(
 	"--set agent.excludedCIDRs={203.0.113.0/24,198.51.100.0/24}"
 	"--set controller.image.digest=sha256:$(printf '0%.0s' {1..64})"
 	"--set images.pullSecrets={regcred}"
+	"--set doctor.enabled=false"
+	"--set doctor.image.digest=sha256:$(printf '0%.0s' {1..64})"
 	"--set controller.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::111122223333:role/natterjack"
 )
 for extra in "${renders[@]}"; do
@@ -55,6 +57,8 @@ refuse "/agent/rulePriority" "${required[@]}" --set agent.rulePriority=40000
 refuse "/agent/selfTest/url" "${required[@]}" --set agent.selfTest.url=http://checkip.example
 refuse "/agent/resync" "${required[@]}" --set agent.resync=30
 refuse "/controller/image/digest" "${required[@]}" --set controller.image.digest=latest
+refuse "/doctor/timeout" "${required[@]}" --set doctor.timeout=60
+refuse "/doctor/image/digest" "${required[@]}" --set doctor.image.digest=latest
 refuse "/controller/aws/region" --set clusterName=lint --set controller.aws.region=USEAST1
 refuse "additional properties 'typo' not allowed" "${required[@]}" --set agent.typo=1
 

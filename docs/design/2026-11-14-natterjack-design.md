@@ -370,7 +370,27 @@ results with the release.
 | A reconcile keeps failing | Retried with exponential backoff from 100 ms, capped at the resync interval, so a fixed problem is picked up within one resync |
 
 `natterjack doctor` (CLI) and `helm test` run all checks before any traffic
-moves and print a go or no-go report.
+moves and print a go or no-go report. The doctor only reads, and reports
+from what the components themselves publish, so it sees what they see:
+
+- Kubernetes is 1.34 or later.
+- Exactly one release is found, or the one named with `--namespace` and
+  `--release`.
+- Controller replicas are ready, and the leader Lease is held, unexpired, by a
+  running controller pod of that release.
+- Every node the agent DaemonSet selects runs a ready agent whose
+  `natterjack.io/dataplane-ready` pod condition is true; otherwise the node and
+  the agent's own error are named. Gateways that hold a slot serve it.
+- Each installed component's ValidatingAdmissionPolicy exists with a denying
+  binding.
+- Every EgressPool is reconciled and ready. `CloudAccess=False` carries the
+  failing call and the identity in use. Degradation, cross-zone egress,
+  quarantined, unschedulable and foreign slots are warnings.
+- Every policy is accepted.
+
+Exit status 0 is go and 1 is no-go. `-o json` gives the same report for
+automation. The `helm test` pod runs the CLI image with read-only RBAC that
+exists only while the test runs.
 
 ## 9. Service mesh and CNI compatibility
 
@@ -406,8 +426,13 @@ moves and print a go or no-go report.
   message (`make chart-lint`); then a kind install on the oldest and newest
   supported Kubernetes (`make chart-e2e`) proving no RBAC denials, no grant
   beyond what each binary uses, both admission policies with pod-bound
-  tokens, recovery within one resync, and an uninstall that leaves no kernel
-  objects behind.
+  tokens, recovery within one resync, `helm test` reporting no-go with the
+  controller's cloud identity when no cloud is reachable, and an uninstall
+  that leaves no kernel objects and no chart objects behind.
+- Release dry run on every pull request (`make release-dry-run`): a full
+  release pushed to a throwaway registry, then checked as a user would pull
+  it: multi-arch images with SBOMs and stamped versions, a chart pinned to
+  exactly those digests, and CLI archives rebuilt byte for byte.
 - Data-plane integration tests in kind: steering, failover timing, conntrack
   behaviour, MSS clamping, isolation rules, both nftables and eBPF modes.
 - End-to-end on real clusters per cloud (EKS, GKE, AKS, OKE). CI builds the
@@ -433,6 +458,9 @@ moves and print a go or no-go report.
 - Multi-arch images (amd64, arm64), distroless, signed with cosign, with SBOM
   and SLSA provenance, published to `ghcr.io/tessarac-llc`.
 - Helm chart published as an OCI artifact to GHCR and listed on Artifact Hub.
+- The `natterjack` CLI as an image (run by `helm test`) and as reproducible
+  archives for Linux, macOS and Windows on amd64 and arm64, with SLSA
+  provenance and SHA-256 sums on the GitHub release.
 - Licence: Apache-2.0. Contributions under the DCO.
 - Documentation: README with a one-page quick start; per-cloud prerequisites
   with shipped Terraform and native-template examples; deployment order

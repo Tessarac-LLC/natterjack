@@ -20,9 +20,9 @@ crds:
   keep: true
 
 images:
-  # -- Pull policy for both images.
+  # -- Pull policy for every image.
   pullPolicy: IfNotPresent
-  # -- Image pull secrets, by name, for both components.
+  # -- Image pull secrets, by name, for every component.
   pullSecrets: []
 
 controller:
@@ -166,3 +166,25 @@ agent:
   serviceAccount:
     # -- ServiceAccount name. Defaults to `<release>-agent`.
     name: ""
+
+doctor:
+  # -- Install the `helm test` that runs `natterjack doctor` in the cluster
+  # and fails unless the installation is ready to carry traffic. The test
+  # adds read-only RBAC only while it runs.
+  enabled: true
+  image:
+    # -- Image of the `natterjack` command-line tool.
+    repository: ghcr.io/tessarac-llc/natterjack
+    # -- Defaults to the chart's appVersion.
+    tag: ""
+    # -- Pin by digest; takes precedence over the tag.
+    digest: ""
+  # -- Time the checks may take.
+  timeout: 60s
+  # -- Doctor container resources.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi

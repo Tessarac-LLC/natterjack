@@ -37,6 +37,9 @@ const (
 	// ConditionGatewayReady is the pod condition a gateway agent sets once its
 	// slot carries traffic and its self-test passes. GatewayReady reads it.
 	ConditionGatewayReady corev1.PodConditionType = Group + "/gateway-ready"
+	// ConditionDataplaneReady is the pod condition every agent sets: true once
+	// its node's data path is applied, false with the error while it is not.
+	ConditionDataplaneReady corev1.PodConditionType = Group + "/dataplane-ready"
 )
 
 // TunnelType selects the encapsulation between source nodes and gateways.
@@ -197,6 +200,9 @@ const (
 	ConditionSlotsQuarantined   = "SlotsQuarantined"
 	ConditionSlotsUnschedulable = "SlotsUnschedulable"
 	ConditionForeignSlots       = "ForeignSlots"
+	// ConditionCloudAccess is false, with the failing call and the identity in
+	// use, while the controller cannot read the cloud.
+	ConditionCloudAccess = "CloudAccess"
 )
 
 // EgressPoolStatus is the observed state of an EgressPool.

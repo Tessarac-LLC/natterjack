@@ -30,6 +30,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -150,15 +151,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 
 	slots, err := r.Provider.Slots(ctx, cloud.Discovery{ClusterName: r.ClusterName})
 	if err != nil {
-		err = r.cloudError("discover slots", err)
-		r.Health.Set(err)
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.cloudDown(ctx, pools.Items, r.cloudError("discover slots", err))
 	}
 	strays, err := r.Provider.Strays(ctx, r.ClusterName)
 	if err != nil {
-		err = r.cloudError("list slots of other clusters", err)
-		r.Health.Set(err)
-		return reconcile.Result{}, err
+		return reconcile.Result{}, r.cloudDown(ctx, pools.Items, r.cloudError("list slots of other clusters", err))
 	}
 	r.Health.Set(nil)
 
@@ -417,6 +414,28 @@ func (r *Reconciler) updateStatus(ctx context.Context, pool *v1.EgressPool, slot
 		return fmt.Errorf("update status of pool %s: %w", pool.Name, err)
 	}
 	return nil
+}
+
+// cloudDown reports a failed cloud read on the readiness probe and on every
+// pool, where kubectl and doctor show it, and returns err for a retry.
+func (r *Reconciler) cloudDown(ctx context.Context, pools []v1.EgressPool, err error) error {
+	r.Health.Set(err)
+	errs := []error{err}
+	for i := range pools {
+		pool := &pools[i]
+		before := pool.DeepCopy()
+		meta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+			Type: v1.ConditionCloudAccess, Status: metav1.ConditionFalse, Reason: "CloudCallFailed",
+			Message: err.Error(), ObservedGeneration: pool.Generation,
+		})
+		if equality.Semantic.DeepEqual(ignoreTimes(before.Status), ignoreTimes(pool.Status)) {
+			continue
+		}
+		if perr := r.Client.Status().Patch(ctx, pool, client.MergeFrom(before)); perr != nil {
+			errs = append(errs, fmt.Errorf("update status of pool %s: %w", pool.Name, perr))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ignoreTimes drops condition transition times, which SetStatusCondition

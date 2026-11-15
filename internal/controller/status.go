@@ -117,6 +117,7 @@ func Status(generation int64, slots []v1.SlotStatus, nodeZones []string, old []m
 			cond(t, false, "None", "none")
 		}
 	}
+	cond(v1.ConditionCloudAccess, true, "CloudReadable", "the controller reads slots from the cloud")
 	list(v1.ConditionSlotsQuarantined, v1.SlotQuarantined, "SafetyCheckFailed", "slots failing safety checks")
 	list(v1.ConditionSlotsUnschedulable, v1.SlotUnschedulable, "NoEligibleNode", "slots with no eligible node")
 	list(v1.ConditionForeignSlots, v1.SlotForeign, "AttachedOutsideCluster", "slots attached outside this cluster")

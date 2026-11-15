@@ -3,7 +3,8 @@ name: release
 # A release is a signed tag vMAJOR.MINOR.PATCH[-PRERELEASE] on a commit of
 # main. It publishes multi-arch images and the chart to GHCR, signs each
 # with cosign (keyless, this workflow's identity), attaches SBOMs and SLSA
-# build provenance, and creates the GitHub release.
+# build provenance, and creates the GitHub release with the CLI archives,
+# which carry provenance too.
 on:
   push:
     tags: ["v*.*.*"]
@@ -89,13 +90,13 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           OUT=dist ./hack/release.sh
-          for k in controller agent chart; do
+          for k in controller agent cli chart; do
             echo "$k=$(jq -r ".$k" dist/release.json | sed 's/.*@//')" >>"$GITHUB_OUTPUT"
           done
           jq . dist/release.json >>"$GITHUB_STEP_SUMMARY"
       - name: Sign images and chart
         run: |
-          for k in controller agent chart; do
+          for k in controller agent cli chart; do
             cosign sign --yes "$(jq -r ".$k" dist/release.json)"
           done
       - name: Controller provenance
@@ -110,6 +111,16 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/natterjack-agent
           subject-digest: ${{ steps.release.outputs.agent }}
           push-to-registry: true
+      - name: CLI image provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/natterjack
+          subject-digest: ${{ steps.release.outputs.cli }}
+          push-to-registry: true
+      - name: CLI archive provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/natterjack_*
       - name: Chart provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -151,6 +162,7 @@ jobs:
         run: |
           controller="$(jq -r .controller dist/release.json)"
           agent="$(jq -r .agent dist/release.json)"
+          cli="$(jq -r .cli dist/release.json)"
           chart_version="$(jq -r .chartVersion dist/release.json)"
           identity="https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$TAG"
           cat >notes.md <<NOTES
@@ -166,6 +178,15 @@ jobs:
 
           - \`$controller\`
           - \`$agent\`
+          - \`$cli\` (\`natterjack doctor\`, run by \`helm test\`)
+
+          ## Check the installation
+
+          \`\`\`sh
+          helm test natterjack --namespace natterjack --logs
+          \`\`\`
+
+          or download the \`natterjack\` CLI below and run \`natterjack doctor\`.
 
           ## Verify
 
@@ -174,11 +195,12 @@ jobs:
             --certificate-identity $identity \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
           gh attestation verify oci://$controller --repo $REPO
+          gh attestation verify natterjack_${TAG}_linux_amd64.tar.gz --repo $REPO
           \`\`\`
           NOTES
           prerelease=()
           [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
-          (cd dist && sha256sum ./*.tgz release.json >SHA256SUMS)
+          (cd dist && sha256sum ./*.tgz ./natterjack_* release.json >SHA256SUMS)
           gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" \
             --notes-file notes.md --generate-notes "${prerelease[@]}" \
-            dist/*.tgz dist/release.json dist/SHA256SUMS
+            dist/*.tgz dist/natterjack_* dist/release.json dist/SHA256SUMS
