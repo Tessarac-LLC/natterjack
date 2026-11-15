@@ -1,5 +1,5 @@
 # Images are built by ko: a static Go binary on a minimal base with CA
-# certificates and nothing else.
+# certificates and nothing else. VERSION names the release in the binary.
 defaultBaseImage: cgr.dev/chainguard/static:latest
 defaultPlatforms:
   - linux/amd64
@@ -9,9 +9,9 @@ builds:
     main: ./cmd/controller
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
-    ldflags: [-s, -w, -buildid=]
+    ldflags: [-s, -w, -buildid=, "-X github.com/Tessarac-LLC/natterjack/internal/version.Version={{.Env.VERSION}}"]
   - id: agent
     main: ./cmd/agent
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
-    ldflags: [-s, -w, -buildid=]
+    ldflags: [-s, -w, -buildid=, "-X github.com/Tessarac-LLC/natterjack/internal/version.Version={{.Env.VERSION}}"]
