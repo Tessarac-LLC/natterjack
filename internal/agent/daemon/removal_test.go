@@ -24,7 +24,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -59,12 +58,11 @@ func TestRemovalWatch(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mine := daemonSet(t, "agent-"+tc.name)
 			other := daemonSet(t, "other-"+tc.name)
+			// The whole namespace, not just this DaemonSet as the agent
+			// caches, so another DaemonSet's deletion reaches the watch.
 			c, err := cache.New(restCfg, cache.Options{
 				Scheme:            testScheme,
 				DefaultNamespaces: map[string]cache.Config{ns: {}},
-				ByObject: map[client.Object]cache.ByObject{
-					&appsv1.DaemonSet{}: {Field: fields.OneTermEqualSelector("metadata.name", mine.Name)},
-				},
 			})
 			if err != nil {
 				t.Fatal(err)
