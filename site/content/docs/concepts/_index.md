@@ -190,3 +190,13 @@ for removal by Karpenter, the cluster autoscaler, the AWS Node Termination
 Handler or as out of service, the controller tells its agent to stop taking
 new flows. Established flows keep the gateway for `drainSeconds`
 before the slot moves.
+
+Restarting an agent, as every upgrade does, disrupts nothing. The gateway's
+namespace, tunnels, address translation and open flows live in the kernel,
+not in the agent, and so does the program that answers probes: it keeps
+answering while the agent is gone, and only while the slot can still send
+traffic out. The controller holds a restarting agent's slot for a minute,
+the new agent picks up its saved assignment from `/run/natterjack`, and
+other nodes keep sending flows to the gateway meanwhile. Open connections
+through it stay up. An agent that is down for more than a minute is treated
+as failed, and its slot moves as above.
