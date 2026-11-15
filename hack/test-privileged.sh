@@ -22,7 +22,6 @@ cleanup() {
 trap cleanup EXIT
 
 (cd "$root" && GOWORK=off GOOS=linux CGO_ENABLED=0 go test -c -o "$work/dataplane.test" ./internal/agent/dataplane/)
-mkdir "$work/signals"
 
 run() { # name, ip, env..., -- test args
 	local name="$1" ip="$2"
@@ -41,18 +40,22 @@ echo "--- one node"
 run "$net-gateway" "" -- -test.run 'TestSingleNodeGateway|TestStaleFlowsAreFlushed'
 docker rm "$net-gateway" >/dev/null
 
-echo "--- tunnel"
-common=(NATTERJACK_TUNNEL_DIR=/t/signals "NATTERJACK_TUNNEL_GATEWAY=$gateway" "NATTERJACK_TUNNEL_SOURCE=$source")
-run "$net-gateway" "$gateway" "${common[@]}" NATTERJACK_TUNNEL_ROLE=gateway -- -test.run TestTunnel >"$work/gateway.log" 2>&1 &
-gw=$!
-run "$net-outsider" "$outsider" "${common[@]}" NATTERJACK_TUNNEL_ROLE=outsider -- -test.run TestTunnel >"$work/outsider.log" 2>&1 &
-out=$!
 status=0
-run "$net-source" "$source" "${common[@]}" NATTERJACK_TUNNEL_ROLE=source -- -test.run TestTunnel || status=1
-wait "$out" || status=1
-wait "$gw" || status=1
-for role in gateway outsider; do
-	echo "--- $role"
-	cat "$work/$role.log"
+for tunnel in Geneve WireGuard; do
+	echo "--- tunnel: $tunnel"
+	mkdir "$work/signals-$tunnel"
+	common=(NATTERJACK_TUNNEL_DIR="/t/signals-$tunnel" "NATTERJACK_TUNNEL_TYPE=$tunnel" "NATTERJACK_TUNNEL_GATEWAY=$gateway" "NATTERJACK_TUNNEL_SOURCE=$source")
+	run "$net-gateway" "$gateway" "${common[@]}" NATTERJACK_TUNNEL_ROLE=gateway -- -test.run TestTunnel >"$work/gateway.log" 2>&1 &
+	gw=$!
+	run "$net-outsider" "$outsider" "${common[@]}" NATTERJACK_TUNNEL_ROLE=outsider -- -test.run TestTunnel >"$work/outsider.log" 2>&1 &
+	out=$!
+	run "$net-source" "$source" "${common[@]}" NATTERJACK_TUNNEL_ROLE=source -- -test.run TestTunnel || status=1
+	wait "$out" || status=1
+	wait "$gw" || status=1
+	for role in gateway outsider; do
+		echo "--- $tunnel: $role"
+		cat "$work/$role.log"
+	done
+	docker rm -f "$net-gateway" "$net-source" "$net-outsider" >/dev/null
 done
 exit "$status"

@@ -17,6 +17,7 @@ limitations under the License.
 package agent
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/netip"
@@ -59,7 +60,9 @@ type Snapshot struct {
 	// Namespaces with their labels, for ClusterEgressPolicy.
 	Namespaces []corev1.Namespace
 	// Gateways are the agent pods labeled as gateways.
-	Gateways        []corev1.Pod
+	Gateways []corev1.Pod
+	// Agents are every agent pod, for the WireGuard keys of their nodes.
+	Agents          []corev1.Pod
 	Policies        []v1.EgressPolicy
 	ClusterPolicies []v1.ClusterEgressPolicy
 	// Excluded destinations for every policy.
@@ -92,10 +95,33 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 		problems = append(problems, fmt.Sprintf("node %s has no IPv4 InternalIP; it cannot steer traffic or serve as a gateway", s.Node.Name))
 	}
 
+	keyOf := map[netip.Addr]string{}
+	for i := range s.Agents {
+		p := &s.Agents[i]
+		ip, ok := ipOf[p.Spec.NodeName]
+		key := v1.WireGuardKey(p)
+		if !ok || key == "" || p.DeletionTimestamp != nil {
+			continue
+		}
+		if !ValidWireGuardKey(key) {
+			problems = append(problems, fmt.Sprintf("agent pod %s publishes an invalid WireGuard key", p.Name))
+			continue
+		}
+		keyOf[ip] = key
+	}
+
 	if s.Self != nil {
 		role, err := gatewayRole(s.Self)
 		if err != nil {
 			problems = append(problems, err.Error())
+		}
+		if role != nil && role.WireGuard {
+			role.Peers = map[netip.Addr]string{}
+			for ip, k := range keyOf {
+				if ip != d.NodeIP {
+					role.Peers[ip] = k
+				}
+			}
 		}
 		d.Gateway = role
 	}
@@ -109,6 +135,8 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 	}
 	byPool := map[string][]gw{}
 	var all []netip.Addr
+	// WireGuard gateways, with their keys; "" until a gateway publishes one.
+	wg := map[netip.Addr]string{}
 	for i := range s.Gateways {
 		p := &s.Gateways[i]
 		ip, ok := ipOf[p.Spec.NodeName]
@@ -122,6 +150,11 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 		var g v1.Gateway
 		ready := json.Unmarshal([]byte(p.Annotations[v1.AnnotationGateway]), &g) == nil &&
 			v1.GatewayReady(p, g.SlotID) && p.Annotations[v1.AnnotationDrainStarted] == "" && !s.Down[ip]
+		if g.Tunnel == v1.TunnelWireGuard {
+			// Without the gateway's key there is no tunnel to it.
+			wg[ip] = keyOf[ip]
+			ready = ready && keyOf[ip] != ""
+		}
 		byPool[pool] = append(byPool[pool], gw{ip: ip, zone: zoneOf[p.Spec.NodeName], ready: ready})
 	}
 	gateways, full := marks.Assign(all)
@@ -132,6 +165,12 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 	markOf := map[netip.Addr]uint32{}
 	for m, ip := range gateways {
 		markOf[ip] = m
+		if k, ok := wg[ip]; ok {
+			if d.WireGuard == nil {
+				d.WireGuard = map[uint32]string{}
+			}
+			d.WireGuard[m] = k
+		}
 		if s.Down[ip] {
 			d.Failed = append(d.Failed, m)
 		}
@@ -262,7 +301,15 @@ func gatewayRole(p *corev1.Pod) (*GatewayRole, error) {
 	return &GatewayRole{
 		Pool: g.Pool, SlotID: g.SlotID, MAC: strings.ToLower(g.MAC), Address: netip.PrefixFrom(priv, subnet.Bits()),
 		Router: router, Public: pub, Draining: p.Annotations[v1.AnnotationDrainStarted] != "",
+		WireGuard: g.Tunnel == v1.TunnelWireGuard,
 	}, nil
+}
+
+// ValidWireGuardKey reports whether key is a base64 Curve25519 public key,
+// as wg(8) prints it.
+func ValidWireGuardKey(key string) bool {
+	b, err := base64.StdEncoding.DecodeString(key)
+	return err == nil && len(b) == 32
 }
 
 // NodeIP is the node's IPv4 InternalIP.

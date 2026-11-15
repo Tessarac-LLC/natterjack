@@ -74,6 +74,7 @@ func run() error {
 		tableBase     = flag.Int("route-table-base", def.TableBase, "first policy routing table the agent owns")
 		rulePriority  = flag.Int("rule-priority", def.RulePriority, "priority of the agent's policy routing rules")
 		tunnelPort    = flag.Uint("tunnel-port", uint(def.TunnelPort), "GENEVE UDP port between nodes")
+		wgPort        = flag.Uint("wireguard-port", uint(def.WireGuardPort), "UDP port gateways of encrypted pools take WireGuard on")
 		probePort     = flag.Uint("probe-port", uint(def.ProbePort), "UDP port gateways answer probes on, inside their namespace")
 		link          = flag.String("gateway-link", def.Link.String(), "link-local /30 between the host and gateway namespaces")
 		stateDir      = flag.String("state-dir", def.StateDir, "directory that survives agent restarts and is emptied by a reboot (a tmpfs under /run)")
@@ -112,11 +113,11 @@ func run() error {
 	if cfg.Link, err = netip.ParsePrefix(*link); err != nil {
 		return fmt.Errorf("--gateway-link: %w", err)
 	}
-	if *tunnelPort > 65535 || *probePort > 65535 || *mss > 65535 {
-		return errors.New("--tunnel-port, --probe-port and --mss must fit in 16 bits")
+	if *tunnelPort > 65535 || *wgPort > 65535 || *probePort > 65535 || *mss > 65535 {
+		return errors.New("--tunnel-port, --wireguard-port, --probe-port and --mss must fit in 16 bits")
 	}
 	cfg.MarkMask, cfg.TableBase, cfg.RulePriority, cfg.StateDir = uint32(mask), *tableBase, *rulePriority, *stateDir
-	cfg.TunnelPort, cfg.ProbePort, cfg.MSS = uint16(*tunnelPort), uint16(*probePort), uint16(*mss)
+	cfg.TunnelPort, cfg.WireGuardPort, cfg.ProbePort, cfg.MSS = uint16(*tunnelPort), uint16(*wgPort), uint16(*probePort), uint16(*mss)
 	exclude := append([]netip.Prefix(nil), agent.DefaultExcluded...)
 	for _, s := range strings.Split(*excluded, ",") {
 		if s = strings.TrimSpace(s); s == "" {
@@ -191,27 +192,29 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
-	// Gateway agent pods come from a second cache: a pod cache holds one
-	// selector per namespace, and the first is taken by this node's pods.
-	gateways, err := cache.New(restCfg, cache.Options{
+	// Agent pods come from a second cache: a pod cache holds one selector
+	// per namespace, and the first is taken by this node's pods. Gateways are
+	// among them, and every agent publishes its node's WireGuard key on its
+	// pod.
+	agents, err := cache.New(restCfg, cache.Options{
 		Scheme:            scheme,
 		Mapper:            mgr.GetRESTMapper(),
 		DefaultNamespaces: map[string]cache.Config{*namespace: {}},
 		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Pod{}: {Label: labels.SelectorFromSet(labels.Set{v1.LabelGateway: "true"})},
+			&corev1.Pod{}: {Label: sel},
 		},
 		DefaultTransform: cache.TransformStripManagedFields(),
 	})
 	if err != nil {
-		return fmt.Errorf("create gateway cache: %w", err)
+		return fmt.Errorf("create agent pod cache: %w", err)
 	}
-	if err := mgr.Add(gateways); err != nil {
-		return fmt.Errorf("start gateway cache: %w", err)
+	if err := mgr.Add(agents); err != nil {
+		return fmt.Errorf("start agent pod cache: %w", err)
 	}
 
 	a := &daemon.Agent{
 		Client:           mgr.GetClient(),
-		Gateways:         gateways,
+		Agents:           agents,
 		AgentSelector:    sel,
 		Dataplane:        dp,
 		Marks:            marks,
@@ -226,7 +229,7 @@ func run() error {
 		Resync:           *resync,
 		Log:              log,
 	}
-	if err := a.SetupWithManager(mgr, gateways); err != nil {
+	if err := a.SetupWithManager(mgr, agents); err != nil {
 		return err //nolint:wrapcheck // already wrapped
 	}
 	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {

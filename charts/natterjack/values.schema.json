@@ -224,6 +224,11 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "wireguardPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
         "probePort": {
           "type": "integer",
           "minimum": 1,

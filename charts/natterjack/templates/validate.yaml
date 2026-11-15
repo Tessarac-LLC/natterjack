@@ -7,3 +7,6 @@
 {{- if not (or .Values.controller.enabled .Values.agent.enabled) }}
 {{- fail "enable the controller, the agent or both" }}
 {{- end }}
+{{- if eq (int .Values.agent.tunnelPort) (int .Values.agent.wireguardPort) }}
+{{- fail "agent.wireguardPort must differ from agent.tunnelPort" }}
+{{- end }}

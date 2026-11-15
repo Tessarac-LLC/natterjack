@@ -90,6 +90,7 @@ No modules.
 | [aws_security_group.slot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group) | resource |
 | [aws_vpc_security_group_egress_rule.slot_ipv4](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_egress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.tunnel](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
+| [aws_vpc_security_group_ingress_rule.wireguard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_subnet.slot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnet) | data source |
 
 ## Inputs
@@ -107,6 +108,7 @@ No modules.
 | slots\_per\_subnet | Slots (ENI with an Elastic IP) per subnet. Two give a zone a warm replacement: the controller fails over by moving an attached slot or using a spare. | `number` | `2` | no |
 | tags | Tags added to every resource the module creates. Cannot override the natterjack.io and no\_manage tags. | `map(string)` | `{}` | no |
 | tunnel\_port | UDP port of the agent tunnel. Must match the chart's agent.tunnelPort. | `number` | `6081` | no |
+| wireguard\_port | UDP port of the agent WireGuard tunnel, used by pools with tunnel WireGuard. Must match the chart's agent.wireguardPort and differ from tunnel\_port. | `number` | `51871` | no |
 
 ## Outputs
 

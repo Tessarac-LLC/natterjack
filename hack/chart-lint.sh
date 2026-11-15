@@ -56,6 +56,7 @@ refuse "/agent/excludedCIDRs/0" "${required[@]}" --set "agent.excludedCIDRs={200
 refuse "/agent/rulePriority" "${required[@]}" --set agent.rulePriority=40000
 refuse "/agent/selfTest/url" "${required[@]}" --set agent.selfTest.url=http://checkip.example
 refuse "/agent/resync" "${required[@]}" --set agent.resync=30
+refuse "agent.wireguardPort must differ from agent.tunnelPort" "${required[@]}" --set agent.wireguardPort=6081
 refuse "/controller/image/digest" "${required[@]}" --set controller.image.digest=latest
 refuse "/doctor/timeout" "${required[@]}" --set doctor.timeout=60
 refuse "/doctor/image/digest" "${required[@]}" --set doctor.image.digest=latest

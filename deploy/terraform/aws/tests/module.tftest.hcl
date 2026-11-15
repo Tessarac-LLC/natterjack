@@ -133,6 +133,11 @@ run "bootstrap_route_and_tunnel_rule" {
     condition     = aws_vpc_security_group_ingress_rule.tunnel[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel[0].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel[0].referenced_security_group_id == "sg-0000000000000000a"
     error_message = "The tunnel rule allows UDP 6081 between nodes only."
   }
+
+  assert {
+    condition     = aws_vpc_security_group_ingress_rule.wireguard[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.wireguard[0].from_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].to_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].referenced_security_group_id == "sg-0000000000000000a"
+    error_message = "The WireGuard rule allows UDP 51871 between nodes only."
+  }
 }
 
 run "bad_inputs_are_refused" {
@@ -144,4 +149,15 @@ run "bad_inputs_are_refused" {
   }
 
   expect_failures = [var.cluster_name, var.slots_per_subnet]
+}
+
+run "ports_must_differ" {
+  command = plan
+
+  variables {
+    tunnel_port    = 51871
+    wireguard_port = 51871
+  }
+
+  expect_failures = [var.wireguard_port]
 }

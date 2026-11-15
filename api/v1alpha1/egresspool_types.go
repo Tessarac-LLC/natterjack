@@ -40,6 +40,11 @@ const (
 	// ConditionDataplaneReady is the pod condition every agent sets: true once
 	// its node's data path is applied, false with the error while it is not.
 	ConditionDataplaneReady corev1.PodConditionType = Group + "/dataplane-ready"
+	// ConditionWireGuardKey is the pod condition in which every agent
+	// publishes its node's WireGuard public key, in its message. Only the
+	// agent on a node can write it: an agent may change only its own pod's
+	// status.
+	ConditionWireGuardKey corev1.PodConditionType = Group + "/wireguard-key"
 )
 
 // TunnelType selects the encapsulation between source nodes and gateways.

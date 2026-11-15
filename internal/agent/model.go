@@ -46,6 +46,9 @@ type Desired struct {
 	// Gateways map each mark in use to the gateway's node IP. Marks stay
 	// while a gateway drains so its established flows keep working.
 	Gateways map[uint32]netip.Addr
+	// WireGuard holds the public key of each gateway, by mark, whose pool
+	// encrypts its tunnel. Other gateways are reached over GENEVE.
+	WireGuard map[uint32]string
 	// Failed are the marks of gateways this node's probes see as down. Flows
 	// pinned to them are flushed, so their next packet picks a live gateway.
 	Failed []uint32
@@ -83,4 +86,10 @@ type GatewayRole struct {
 	Public netip.Addr
 	// Draining is set when the gateway must stop taking new flows.
 	Draining bool
+	// WireGuard is set when the pool encrypts its tunnel. The gateway then
+	// accepts traffic only over WireGuard, from Peers.
+	WireGuard bool
+	// Peers are the WireGuard public keys of the cluster's nodes, by node IP.
+	// A node's key is accepted only for traffic from that node's address.
+	Peers map[netip.Addr]string
 }

@@ -21,7 +21,8 @@ Before installing:
 
 - Create the egress slots and the controller's IAM role. The Terraform module
   in [`deploy/terraform/aws`](../../deploy/terraform/aws) does both, and opens
-  UDP `agent.tunnelPort` (6081 by default) between nodes. With IRSA, set
+  UDP `agent.tunnelPort` (6081 by default) and `agent.wireguardPort` (51871 by
+  default) between nodes. With IRSA, set
   `controller.serviceAccount.annotations` to the role it outputs.
 - Set `net.ipv4.conf.all.rp_filter` to 0 or 2 on every node. EKS AMIs already
   do. The agent refuses to steer traffic on a node in strict mode and says so.
@@ -79,6 +80,7 @@ Kubernetes: `>=1.34.0-0`
 | `agent.tolerations` | list | `[{"operator":"Exists"}]` | The agent tolerates every taint by default so it runs on every node. |
 | `agent.tunnelPort` | int | `6081` | GENEVE UDP port between nodes. Node security groups must allow it between nodes. |
 | `agent.updateStrategy.maxUnavailable` | int | `1` | Agents restarted at once during an upgrade. Each restart moves that node's gateway role to another node in its zone. |
+| `agent.wireguardPort` | int | `51871` | WireGuard UDP port between nodes, for pools with `tunnel: WireGuard`. Must differ from tunnelPort. Node security groups must allow it between nodes. |
 | `clusterName` | string | `""` | Name of this cluster. The controller only uses egress slots tagged `natterjack.io/cluster=<clusterName>`. Required. |
 | `controller.affinity` | object | `{}` | Affinity for controller pods. |
 | `controller.aws.region` | string | `""` | AWS region of the cluster's VPC. Required when the controller is enabled. |

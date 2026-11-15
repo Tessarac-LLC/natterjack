@@ -32,6 +32,7 @@ import (
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/Tessarac-LLC/natterjack/internal/agent"
 )
@@ -48,6 +49,7 @@ type Dataplane struct {
 	cfg   Config
 	log   logr.Logger
 	shift int
+	key   wgtypes.Key
 
 	mu       sync.Mutex
 	gw       *GatewayNS
@@ -63,12 +65,16 @@ func New(cfg Config, log logr.Logger) (*Dataplane, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("state directory: %w", err)
 	}
+	key, err := loadKey(cfg.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	gw, err := openGatewayNS(cfg.StateDir)
 	if err != nil {
 		return nil, err
 	}
 	return &Dataplane{
-		cfg: cfg, log: log, shift: bits.TrailingZeros32(cfg.MarkMask), gw: gw,
+		cfg: cfg, log: log, shift: bits.TrailingZeros32(cfg.MarkMask), gw: gw, key: key,
 		failed: map[uint32]bool{},
 	}, nil
 }
@@ -126,14 +132,25 @@ func (d *Dataplane) Apply(want *agent.Desired) (Status, error) {
 		return Status{}, err
 	}
 
-	if err := d.applyRoutes(want, tunnel, serving); err != nil {
+	wg, wgGateway, err := d.applyWireGuard(want, underlay.Attrs().MTU)
+	if err != nil {
+		return st, err
+	}
+	if err := d.applyRoutes(want, tunnels{geneve: tunnel, wireGuard: wg, gateway: wgGateway}, serving); err != nil {
 		return st, err
 	}
 	c, err := nftables.New()
 	if err != nil {
 		return st, fmt.Errorf("nftables: %w", err)
 	}
-	if err := hostRuleset(c, want, d.cfg.MarkMask, d.cfg, serving); err != nil {
+	gatewayTunnel := ""
+	if serving {
+		gatewayTunnel = TunnelLink
+		if want.Gateway.WireGuard {
+			gatewayTunnel = WireGuardLink
+		}
+	}
+	if err := hostRuleset(c, want, d.cfg.MarkMask, d.cfg, gatewayTunnel); err != nil {
 		return st, err
 	}
 	if err := c.Flush(); err != nil {
@@ -234,9 +251,20 @@ func isNotFound(err error) bool {
 	return errors.As(err, &nf)
 }
 
+// tunnels are the devices traffic to and from gateways uses.
+type tunnels struct {
+	// geneve is nj0.
+	geneve netlink.Link
+	// wireGuard are this node's devices to encrypted gateways, by mark.
+	wireGuard map[uint32]netlink.Link
+	// gateway is njwg when this node serves an encrypted pool.
+	gateway netlink.Link
+}
+
 // applyRoutes programs one table per gateway mark, the fwmark rules that
 // select them and, on a serving gateway, the tunnel to namespace tables.
-func (d *Dataplane) applyRoutes(want *agent.Desired, tunnel netlink.Link, serving bool) error {
+func (d *Dataplane) applyRoutes(want *agent.Desired, tun tunnels, serving bool) error {
+	tunnel := tun.geneve
 	routes := map[int][]netlink.Route{}
 	var rules []netlink.Rule
 	gwAddr := net.IP(d.cfg.GatewayAddr().AsSlice())
@@ -251,6 +279,15 @@ func (d *Dataplane) applyRoutes(want *agent.Desired, tunnel netlink.Link, servin
 	for m, ip := range want.Gateways {
 		t := d.table(m)
 		r := netlink.Route{Table: t, Dst: defaultDst(), LinkIndex: tunnel.Attrs().Index, Encap: &tunnelEncap{ID: VNI, Dst: ip}}
+		if _, encrypted := want.WireGuard[m]; encrypted && ip != want.NodeIP {
+			// An encrypted gateway is reached only through its WireGuard
+			// device; until the device exists (no key yet) the table stays
+			// empty, never falling back to GENEVE.
+			r = netlink.Route{}
+			if l, ok := tun.wireGuard[m]; ok {
+				r = netlink.Route{Table: t, Dst: defaultDst(), LinkIndex: l.Attrs().Index}
+			}
+		}
 		if ip == want.NodeIP {
 			if !serving {
 				// This node's own gateway is not up: leave the table empty so
@@ -274,15 +311,26 @@ func (d *Dataplane) applyRoutes(want *agent.Desired, tunnel netlink.Link, servin
 	}
 	if serving {
 		routes[d.tgw()] = []netlink.Route{{Table: d.tgw(), Dst: defaultDst(), LinkIndex: veth, Gw: gwAddr}}
+		in := TunnelLink
 		for _, n := range want.Nodes {
 			if n == want.NodeIP {
 				continue
 			}
-			routes[d.tret()] = append(routes[d.tret()], netlink.Route{
-				Table: d.tret(), Dst: hostPrefix(n), LinkIndex: tunnel.Attrs().Index, Encap: &tunnelEncap{ID: VNI, Dst: n},
-			})
+			r := netlink.Route{Table: d.tret(), Dst: hostPrefix(n), LinkIndex: tunnel.Attrs().Index, Encap: &tunnelEncap{ID: VNI, Dst: n}}
+			if want.Gateway.WireGuard {
+				// WireGuard picks the node's peer by its address. A node
+				// without a key has no peer and gets no route.
+				if _, ok := want.Gateway.Peers[n]; !ok || tun.gateway == nil {
+					continue
+				}
+				r = netlink.Route{Table: d.tret(), Dst: hostPrefix(n), LinkIndex: tun.gateway.Attrs().Index}
+			}
+			routes[d.tret()] = append(routes[d.tret()], r)
 		}
-		for i, iif := range []string{TunnelLink, VethHost} {
+		if want.Gateway.WireGuard {
+			in = WireGuardLink
+		}
+		for i, iif := range []string{in, VethHost} {
 			rule := netlink.NewRule()
 			rule.Priority, rule.IifName, rule.Family = d.cfg.RulePriority+i, iif, unix.AF_INET
 			rule.Table = d.tgw()
@@ -706,6 +754,10 @@ func (d *Dataplane) Teardown() error {
 		if err := netlink.LinkDel(l); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", TunnelLink, err))
 		}
+	}
+	errs = append(errs, d.removeWireGuard(nil))
+	if err := os.Remove(d.cfg.StateDir + "/" + keyFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("remove WireGuard key: %w", err))
 	}
 	if _, err := netlink.ConntrackDeleteFilters(netlink.ConntrackTable, unix.AF_INET, anyMark{d.cfg.MarkMask}); err != nil {
 		errs = append(errs, fmt.Errorf("flush steered flows: %w", err))
