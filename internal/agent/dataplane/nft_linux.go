@@ -200,9 +200,9 @@ func ctEstablished() []expr.Any {
 	}
 }
 
-// markBits loads the masked meta mark (or ct mark) and compares it.
-func markBits(ct bool, mask uint32, op expr.CmpOp, v uint32) []expr.Any {
-	return append(loadMarkBits(ct, mask), &expr.Cmp{Op: op, Register: reg1, Data: native(v)})
+// markBits loads the masked meta mark (or ct mark) and compares it with 0.
+func markBits(ct bool, mask uint32, op expr.CmpOp) []expr.Any {
+	return append(loadMarkBits(ct, mask), &expr.Cmp{Op: op, Register: reg1, Data: native(0)})
 }
 
 func loadMarkBits(ct bool, mask uint32) []expr.Any {
@@ -242,13 +242,14 @@ func ifIs(in bool, name string, eq bool) []expr.Any {
 	return []expr.Any{&expr.Meta{Key: key, Register: reg1}, &expr.Cmp{Op: op, Register: reg1, Data: ifname(name)}}
 }
 
-// ifPrefix matches an interface whose name starts with prefix.
-func ifPrefix(in bool, prefix string) []expr.Any {
+// ifWireGuard matches a source node's WireGuard devices: every interface
+// whose name starts with WireGuardPrefix.
+func ifWireGuard(in bool) []expr.Any {
 	key := expr.MetaKeyOIFNAME
 	if in {
 		key = expr.MetaKeyIIFNAME
 	}
-	return []expr.Any{&expr.Meta{Key: key, Register: reg1}, &expr.Cmp{Op: expr.CmpOpEq, Register: reg1, Data: []byte(prefix)}}
+	return []expr.Any{&expr.Meta{Key: key, Register: reg1}, &expr.Cmp{Op: expr.CmpOpEq, Register: reg1, Data: []byte(WireGuardPrefix)}}
 }
 
 func addr(src bool) expr.Any {
@@ -398,7 +399,7 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 		if err != nil {
 			return err
 		}
-		r.rule(ch, markBits(true, mask, expr.CmpOpEq, 0), flowHash(rm))
+		r.rule(ch, markBits(true, mask, expr.CmpOpEq), flowHash(rm))
 		r.rule(ch, markLookup(markMap, mask))
 	}
 
@@ -408,7 +409,7 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 	output := r.base("output", nftables.ChainTypeRoute, nftables.ChainHookOutput, prioMangle, nil)
 	for _, ch := range []*nftables.Chain{steer, output} {
 		r.rule(ch, ctReply(), verdict(expr.VerdictReturn))
-		r.rule(ch, markBits(false, mask, expr.CmpOpNeq, 0), verdict(expr.VerdictReturn))
+		r.rule(ch, markBits(false, mask, expr.CmpOpNeq), verdict(expr.VerdictReturn))
 		r.rule(ch, addrIn(false, excluded, true), verdict(expr.VerdictReturn))
 	}
 	for i, st := range d.Steers {
@@ -438,7 +439,7 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 	for _, link := range []string{TunnelLink, WireGuardLink} {
 		r.rule(pre, ifIs(true, link, true), ctOriginal(), addrIn(true, nodes, false), verdict(expr.VerdictDrop))
 	}
-	r.rule(pre, ifPrefix(true, WireGuardPrefix), ctOriginal(), verdict(expr.VerdictDrop))
+	r.rule(pre, ifWireGuard(true), ctOriginal(), verdict(expr.VerdictDrop))
 	r.rule(pre, jump("steer"))
 
 	// Tunnel packets are accepted only from cluster nodes.
@@ -459,18 +460,18 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 			r.rule(fwd, ifIs(true, link, true), ctOriginal(), verdict(expr.VerdictDrop))
 		}
 	}
-	r.rule(fwd, ifPrefix(true, WireGuardPrefix), ctOriginal(), verdict(expr.VerdictDrop))
+	r.rule(fwd, ifWireGuard(true), ctOriginal(), verdict(expr.VerdictDrop))
 
 	// Steered flows leave with the node's address, so replies return here,
 	// and an encrypted gateway accepts them from this node's key.
 	post := r.base("postrouting", nftables.ChainTypeNAT, nftables.ChainHookPostrouting, prioSrcNAT-10, nil)
 	for _, link := range []string{TunnelLink, VethHost} {
-		r.rule(post, markBits(false, mask, expr.CmpOpNeq, 0), ifIs(false, link, true), snat(d.NodeIP))
+		r.rule(post, markBits(false, mask, expr.CmpOpNeq), ifIs(false, link, true), snat(d.NodeIP))
 	}
-	r.rule(post, markBits(false, mask, expr.CmpOpNeq, 0), ifPrefix(false, WireGuardPrefix), snat(d.NodeIP))
+	r.rule(post, markBits(false, mask, expr.CmpOpNeq), ifWireGuard(false), snat(d.NodeIP))
 	mss := r.base("mss", nftables.ChainTypeFilter, nftables.ChainHookPostrouting, prioMangle, nil)
 	r.rule(mss, ifIs(false, TunnelLink, true), tcpSyn(), clampToRoute())
-	r.rule(mss, ifPrefix(false, WireGuardPrefix), tcpSyn(), clampToRoute())
+	r.rule(mss, ifWireGuard(false), tcpSyn(), clampToRoute())
 	return nil
 }
 

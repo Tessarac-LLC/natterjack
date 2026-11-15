@@ -44,7 +44,7 @@ const keyFile = "wireguard.key"
 // loadKey reads the node's private key, creating it on first use.
 func loadKey(dir string) (wgtypes.Key, error) {
 	path := filepath.Join(dir, keyFile)
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the agent's own state directory, from its flags
 	if err == nil {
 		k, perr := wgtypes.ParseKey(strings.TrimSpace(string(raw)))
 		if perr == nil {
