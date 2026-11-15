@@ -493,7 +493,9 @@ kubectl delete egresspolicy -n app egress >/dev/null
 kubectl delete egresspool default --wait=true --timeout=120s >/dev/null || fail "the pool was not deleted"
 none_attached() { ! grep -q '"eni-' <<<"$(fake_state)"; }
 eventually 120 "every slot is detached once the pool is gone" none_attached
-helm uninstall "$release" -n "$ns" --wait --timeout 180s >/dev/null || fail "uninstall failed"
+# Helm names the resource it could not delete only in its debug output.
+helm uninstall "$release" -n "$ns" --wait --timeout 180s --debug >"$work/uninstall.log" 2>&1 ||
+	fail "uninstall failed: $(grep -iE 'error|fail' "$work/uninstall.log" | tail -n 20)"
 for n in $(kind get nodes --name "$cluster"); do
 	if docker exec "$n" sh -c 'nft list tables; ip link; ip rule' | grep -E 'natterjack|nj(gw|tun|wg|d0)'; then
 		fail "$n still holds Natterjack kernel objects"
