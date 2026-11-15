@@ -63,7 +63,7 @@ func stream(w http.ResponseWriter, r *http.Request) {
 	defer tick.Stop()
 	end := time.After(d)
 	for n := 0; ; n++ {
-		if _, err := fmt.Fprintf(w, "%s %d\n", ap.Addr().Unmap(), n); err != nil {
+		if _, err := fmt.Fprintf(w, "%s %d\n", ap.Addr().Unmap(), n); err != nil { // #nosec G705 -- an IP address and a count, served as plain text
 			return
 		}
 		if flush != nil {

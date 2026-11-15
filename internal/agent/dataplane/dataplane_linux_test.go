@@ -381,7 +381,7 @@ func TestSingleNodeGateway(t *testing.T) {
 	}
 	// Nor while the slot does not serve, nor to a sender that is not a node.
 	for name, w := range map[string]func(*agent.Desired){
-		"a slot that does not serve": func(w *agent.Desired) { g := *w.Gateway; g.MAC = "02:00:00:00:99:99"; w.Gateway = &g },
+		"a slot that does not serve":  func(w *agent.Desired) { g := *w.Gateway; g.MAC = "02:00:00:00:99:99"; w.Gateway = &g },
 		"a sender that is not a node": func(w *agent.Desired) { w.Nodes = []netip.Addr{netip.MustParseAddr("192.0.2.77")} },
 	} {
 		other := *want
