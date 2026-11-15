@@ -1,0 +1,17 @@
+# Images are built by ko: a static Go binary on a minimal base with CA
+# certificates and nothing else.
+defaultBaseImage: cgr.dev/chainguard/static:latest
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+builds:
+  - id: controller
+    main: ./cmd/controller
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: [-s, -w, -buildid=]
+  - id: agent
+    main: ./cmd/agent
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: [-s, -w, -buildid=]

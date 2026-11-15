@@ -1,0 +1,103 @@
+{{- $fullname := include "natterjack.fullname" . }}
+{{- if .Values.agent.enabled }}
+# An agent may change the status of its own pod and no other: its
+# ServiceAccount token is bound to its pod, and the API server names that pod
+# in the request.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $fullname }}-agent-own-pod
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [UPDATE]
+        resources: [pods/status]
+  matchConditions:
+    - name: is-agent
+      expression: >-
+        request.userInfo.username == "system:serviceaccount:{{ .Release.Namespace }}:{{ include "natterjack.agent.serviceAccount" . }}"
+  validations:
+    - expression: >-
+        "authentication.kubernetes.io/pod-name" in request.userInfo.extra &&
+        request.userInfo.extra["authentication.kubernetes.io/pod-name"] == [request.name] &&
+        request.namespace == "{{ .Release.Namespace }}"
+      message: an agent may only change its own pod's status
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $fullname }}-agent-own-pod
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+spec:
+  policyName: {{ $fullname }}-agent-own-pod
+  validationActions: [Deny]
+{{- end }}
+{{- if .Values.controller.enabled }}
+---
+# The controller may only change natterjack.io/ labels and annotations, and
+# only on agent pods.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $fullname }}-controller-agent-pods
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE, DELETE]
+        resources: [pods]
+  matchConditions:
+    - name: is-controller
+      expression: >-
+        request.userInfo.username == "system:serviceaccount:{{ .Release.Namespace }}:{{ include "natterjack.controller.serviceAccount" . }}"
+  variables:
+    - name: oldLabels
+      expression: "oldObject != null && has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}"
+    - name: newLabels
+      expression: "object != null && has(object.metadata.labels) ? object.metadata.labels : {}"
+    - name: oldAnnotations
+      expression: "oldObject != null && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+    - name: newAnnotations
+      expression: "object != null && has(object.metadata.annotations) ? object.metadata.annotations : {}"
+  validations:
+    - expression: request.operation == "UPDATE"
+      message: the controller never creates or deletes pods
+      reason: Forbidden
+    - expression: >-
+        variables.oldLabels["app.kubernetes.io/name"] == "natterjack-agent" &&
+        variables.oldLabels["app.kubernetes.io/component"] == "agent" &&
+        variables.oldLabels["app.kubernetes.io/instance"] == "{{ .Release.Name }}"
+      message: the controller may only change agent pods
+      reason: Forbidden
+    - expression: >-
+        variables.oldLabels.all(k, k.startsWith("natterjack.io/") || (k in variables.newLabels && variables.newLabels[k] == variables.oldLabels[k])) &&
+        variables.newLabels.all(k, k.startsWith("natterjack.io/") || k in variables.oldLabels) &&
+        variables.oldAnnotations.all(k, k.startsWith("natterjack.io/") || (k in variables.newAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k])) &&
+        variables.newAnnotations.all(k, k.startsWith("natterjack.io/") || k in variables.oldAnnotations)
+      message: the controller may only change natterjack.io/ labels and annotations
+      reason: Forbidden
+    - expression: object.spec == oldObject.spec
+      message: the controller may not change a pod's spec
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $fullname }}-controller-agent-pods
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  policyName: {{ $fullname }}-controller-agent-pods
+  validationActions: [Deny]
+{{- end }}

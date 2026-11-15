@@ -1,0 +1,9 @@
+{{- if and .Values.controller.enabled (not .Values.clusterName) }}
+{{- fail "clusterName is required: the controller only uses slots tagged natterjack.io/cluster=<clusterName>" }}
+{{- end }}
+{{- if and .Values.controller.enabled (not .Values.controller.aws.region) }}
+{{- fail "controller.aws.region is required" }}
+{{- end }}
+{{- if not (or .Values.controller.enabled .Values.agent.enabled) }}
+{{- fail "enable the controller, the agent or both" }}
+{{- end }}

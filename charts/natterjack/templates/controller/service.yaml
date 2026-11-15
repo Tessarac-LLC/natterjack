@@ -1,0 +1,18 @@
+{{- if .Values.controller.enabled }}
+# Metrics for Prometheus; every scrape needs an authorized Kubernetes identity.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "natterjack.fullname" . }}-controller-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "controller") | nindent 4 }}
+spec:
+  selector:
+    {{- include "natterjack.selectorLabels" (dict "root" . "component" "controller") | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.controller.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

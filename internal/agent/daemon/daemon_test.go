@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -46,7 +47,11 @@ import (
 
 const ns = "natterjack"
 
-var k8s client.Client
+var (
+	k8s        client.Client
+	restCfg    *rest.Config
+	testScheme *runtime.Scheme
+)
 
 func TestMain(m *testing.M) {
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
@@ -65,6 +70,7 @@ func TestMain(m *testing.M) {
 	if err := v1.AddToScheme(scheme); err != nil {
 		panic(err)
 	}
+	restCfg, testScheme = cfg, scheme
 	if k8s, err = client.New(cfg, client.Options{Scheme: scheme}); err != nil {
 		panic(err)
 	}

@@ -1,0 +1,124 @@
+{{- if .Values.agent.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "natterjack.fullname" . }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "natterjack.componentLabels" (dict "root" . "component" "agent") | nindent 4 }}
+spec:
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "natterjack.selectorLabels" (dict "root" . "component" "agent") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: {{ .Values.agent.updateStrategy.maxUnavailable }}
+  template:
+    metadata:
+      labels:
+        {{- include "natterjack.componentLabels" (dict "root" . "component" "agent") | nindent 8 }}
+        {{- with .Values.agent.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "natterjack.agent.serviceAccount" . }}
+      {{- include "natterjack.pullSecrets" . | nindent 6 }}
+      priorityClassName: {{ .Values.agent.priorityClassName }}
+      # The agent programs the node's own network: nftables, routes, rules,
+      # GENEVE links and conntrack (CAP_NET_ADMIN), and creates and pins the
+      # gateway network namespace (CAP_SYS_ADMIN with bidirectional mount
+      # propagation, which Kubernetes allows only to privileged containers).
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # Uninstall removes the data path before the agent exits.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: agent
+          image: {{ include "natterjack.image" (dict "root" . "image" .Values.agent.image) }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          args:
+            - --agent-selector={{ include "natterjack.agentSelector" . }}
+            {{- with .Values.agent.excludedCIDRs }}
+            - --excluded-cidrs={{ join "," . }}
+            {{- end }}
+            - --mark-mask={{ .Values.agent.markMask }}
+            - --route-table-base={{ .Values.agent.routeTableBase }}
+            - --rule-priority={{ .Values.agent.rulePriority }}
+            - --tunnel-port={{ .Values.agent.tunnelPort }}
+            - --probe-port={{ .Values.agent.probePort }}
+            - --gateway-link={{ .Values.agent.gatewayLink }}
+            - --state-dir={{ .Values.agent.stateDir }}
+            - --mss={{ .Values.agent.mss }}
+            - --self-test-url={{ .Values.agent.selfTest.url }}
+            - --self-test-interval={{ .Values.agent.selfTest.interval }}
+            - --resync={{ .Values.agent.resync }}
+            - --metrics-bind-address=:{{ .Values.agent.ports.metrics }}
+            - --health-probe-bind-address=:{{ .Values.agent.ports.health }}
+            - --zap-log-level={{ .Values.agent.logLevel }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.agent.ports.metrics }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.agent.ports.health }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: state
+              mountPath: {{ .Values.agent.stateDir }}
+              mountPropagation: Bidirectional
+          {{- with .Values.agent.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: state
+          hostPath:
+            path: {{ .Values.agent.stateDir }}
+            type: DirectoryOrCreate
+      {{- with .Values.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -7,10 +7,22 @@ CONTROLLER_GEN_VERSION := v0.23.0
 SETUP_ENVTEST_VERSION := release-0.25
 GOVULNCHECK_VERSION := v1.9.0
 ENVTEST_K8S_VERSION := 1.37.0
+HELM_VERSION := v4.3.2
+KUBECONFORM_VERSION := v0.8.0
+KIND_VERSION := v0.33.0
+KO_VERSION := v0.19.1
+HELM_DOCS_VERSION := v1.14.2
 
 CONTROLLER_GEN := $(BIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
 SETUP_ENVTEST := $(BIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
 GOVULNCHECK := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)
+HELM := $(BIN)/helm-$(HELM_VERSION)
+KUBECONFORM := $(BIN)/kubeconform-$(KUBECONFORM_VERSION)
+KIND := $(BIN)/kind-$(KIND_VERSION)
+KO := $(BIN)/ko-$(KO_VERSION)
+HELM_DOCS := $(BIN)/helm-docs-$(HELM_DOCS_VERSION)
+# Chart scripts find the pinned tools first.
+CHART_PATH := $(BIN)/chart-tools:$(PATH)
 
 .PHONY: check
 check: verify-generated lint test vuln ## Everything CI runs on Go code
@@ -20,11 +32,13 @@ generate: $(CONTROLLER_GEN) ## Regenerate deepcopy code and CRDs
 	$(CONTROLLER_GEN) object:headerFile=hack/boilerplate.go.txt paths=./api/...
 	rm -f config/crd/*.yaml
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd
+	rm -f charts/natterjack/files/crds/*.yaml
+	cp config/crd/*.yaml charts/natterjack/files/crds/
 
 .PHONY: verify-generated
 verify-generated: generate ## Fail if generated files are out of date
-	@git diff --exit-code -- api config || { echo "generated files are stale: run 'make generate' and commit"; exit 1; }
-	@test -z "$$(git status --porcelain -- api config)" || { git status --porcelain -- api config; echo "untracked generated files: run 'make generate' and commit"; exit 1; }
+	@git diff --exit-code -- api config charts/natterjack/files || { echo "generated files are stale: run 'make generate' and commit"; exit 1; }
+	@test -z "$$(git status --porcelain -- api config charts/natterjack/files)" || { git status --porcelain -- api config charts/natterjack/files; echo "untracked generated files: run 'make generate' and commit"; exit 1; }
 
 .PHONY: lint
 lint: ## golangci-lint (install from https://golangci-lint.run)
@@ -38,6 +52,27 @@ test: $(SETUP_ENVTEST) ## Unit and envtest suites with the race detector
 .PHONY: test-privileged
 test-privileged: ## Data path tests in throwaway privileged containers (needs Docker)
 	./hack/test-privileged.sh
+
+.PHONY: chart-lint
+chart-lint: chart-tools ## Lint the chart, validate every rendering, check bad input is refused
+	PATH="$(CHART_PATH)" ./hack/chart-lint.sh
+
+.PHONY: chart-docs
+chart-docs: chart-tools ## Regenerate the chart README's values reference
+	$(HELM_DOCS) --chart-search-root charts --template-files README.md.gotmpl
+
+.PHONY: chart-e2e
+chart-e2e: chart-tools ## Install the chart on a throwaway kind cluster and prove it (needs Docker)
+	PATH="$(CHART_PATH)" ./hack/chart-e2e.sh $(KIND_NODE_IMAGE)
+
+.PHONY: chart-tools
+chart-tools: $(HELM) $(KUBECONFORM) $(KIND) $(KO) $(HELM_DOCS)
+	mkdir -p $(BIN)/chart-tools
+	ln -sf $(HELM) $(BIN)/chart-tools/helm
+	ln -sf $(KUBECONFORM) $(BIN)/chart-tools/kubeconform
+	ln -sf $(KIND) $(BIN)/chart-tools/kind
+	ln -sf $(KO) $(BIN)/chart-tools/ko
+	ln -sf $(HELM_DOCS) $(BIN)/chart-tools/helm-docs
 
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Known vulnerabilities reachable from our code
@@ -75,6 +110,26 @@ terraform-check: $(TERRAFORM_DOCS) ## Format, validate, test and document the Te
 $(TERRAFORM_DOCS):
 	GOBIN=$(BIN) go install github.com/terraform-docs/terraform-docs@$(TERRAFORM_DOCS_VERSION)
 	mv $(BIN)/terraform-docs $@
+
+$(HELM):
+	GOBIN=$(BIN) go install helm.sh/helm/v4/cmd/helm@$(HELM_VERSION)
+	mv $(BIN)/helm $@
+
+$(HELM_DOCS):
+	GOBIN=$(BIN) go install github.com/norwoodj/helm-docs/cmd/helm-docs@$(HELM_DOCS_VERSION)
+	mv $(BIN)/helm-docs $@
+
+$(KUBECONFORM):
+	GOBIN=$(BIN) go install github.com/yannh/kubeconform/cmd/kubeconform@$(KUBECONFORM_VERSION)
+	mv $(BIN)/kubeconform $@
+
+$(KIND):
+	GOBIN=$(BIN) go install sigs.k8s.io/kind@$(KIND_VERSION)
+	mv $(BIN)/kind $@
+
+$(KO):
+	GOBIN=$(BIN) go install github.com/google/ko@$(KO_VERSION)
+	mv $(BIN)/ko $@
 
 .PHONY: help
 help:

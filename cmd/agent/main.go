@@ -148,11 +148,28 @@ func run() error {
 		return fmt.Errorf("register natterjack types: %w", err)
 	}
 	restCfg := ctrl.GetConfigOrDie()
+	direct, err := client.New(restCfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	daemonSet, err := ownDaemonSet(direct, *namespace, *podName)
+	if err != nil {
+		return err
+	}
+	byObject := map[client.Object]cache.ByObject{
+		// Every agent caches only its own node's pods.
+		&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", *nodeName)},
+	}
+	if daemonSet != "" {
+		byObject[&appsv1.DaemonSet{}] = cache.ByObject{
+			Namespaces: map[string]cache.Config{*namespace: {}},
+			Field:      fields.OneTermEqualSelector("metadata.name", daemonSet),
+		}
+	}
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
-			// Every agent caches only its own node's pods.
-			ByObject:         map[client.Object]cache.ByObject{&corev1.Pod{}: {Field: fields.OneTermEqualSelector("spec.nodeName", *nodeName)}},
+			ByObject:         byObject,
 			DefaultTransform: cache.TransformStripManagedFields(),
 		},
 		Metrics: metricsserver.Options{
@@ -210,41 +227,61 @@ func run() error {
 		return fmt.Errorf("add readiness check: %w", err)
 	}
 
+	removal := &daemon.RemovalWatch{}
+	if daemonSet != "" {
+		if err := removal.Watch(context.Background(), mgr.GetCache(), daemonSet); err != nil {
+			return err //nolint:wrapcheck // already wrapped
+		}
+	}
+
 	ctx := ctrl.SetupSignalHandler()
 	runErr := mgr.Start(ctx)
 	a.Close()
 	if runErr != nil {
 		return fmt.Errorf("run manager: %w", runErr)
 	}
-	return uninstallIfRemoved(mgr.GetAPIReader(), dp, *namespace, *podName, log)
+	if !removal.Removed() && !daemonSetGone(direct, *namespace, daemonSet, log) {
+		// An upgrade, a node drain or a crash: the data path stays and
+		// traffic keeps flowing until the agent is back.
+		return nil
+	}
+	log.Info("agent DaemonSet removed; removing the data path")
+	if err := dp.Teardown(); err != nil {
+		return fmt.Errorf("remove the data path: %w", err)
+	}
+	return nil
 }
 
-// uninstallIfRemoved removes the data path when the agent's DaemonSet is
-// gone or being deleted, so an uninstalled agent leaves no steering behind.
-// On any other stop (an upgrade, a node drain, a crash) the data path stays
-// and traffic keeps flowing until the agent is back.
-func uninstallIfRemoved(c client.Reader, dp *dataplane.Dataplane, namespace, podName string, log logr.Logger) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// ownDaemonSet names the DaemonSet that runs this pod, or "" when none does.
+func ownDaemonSet(c client.Reader, namespace, podName string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	pod := &corev1.Pod{}
 	if err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: podName}, pod); err != nil {
-		log.Error(err, "cannot read own pod at shutdown; leaving the data path in place")
-		return nil
+		return "", fmt.Errorf("read own pod %s/%s: %w", namespace, podName, err)
 	}
-	owner := metav1.GetControllerOf(pod)
-	if owner == nil || owner.Kind != "DaemonSet" {
-		return nil
+	if owner := metav1.GetControllerOf(pod); owner != nil && owner.Kind == "DaemonSet" {
+		return owner.Name, nil
 	}
+	return "", nil
+}
+
+// daemonSetGone asks the API server, at shutdown, whether the agent's
+// DaemonSet is gone or being deleted, for a removal the watch missed. When
+// the answer is unknown the data path stays.
+func daemonSetGone(c client.Reader, namespace, name string, log logr.Logger) bool {
+	if name == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	ds := &appsv1.DaemonSet{}
-	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: owner.Name}, ds)
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, ds)
 	switch {
 	case apierrors.IsNotFound(err), err == nil && ds.DeletionTimestamp != nil:
-		log.Info("agent DaemonSet removed; removing the data path")
-		if err := dp.Teardown(); err != nil {
-			return fmt.Errorf("remove the data path: %w", err)
-		}
+		return true
 	case err != nil:
 		log.Error(err, "cannot read the agent DaemonSet at shutdown; leaving the data path in place")
 	}
-	return nil
+	return false
 }
