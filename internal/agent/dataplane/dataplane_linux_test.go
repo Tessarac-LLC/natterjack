@@ -559,6 +559,7 @@ func TestTunnel(t *testing.T) {
 	switch role {
 	case "gateway":
 		seen, _ := world(t)
+		cniMasquerade(t)
 		dp, err := New(cfg, testr.New(t))
 		must(t, err)
 		t.Cleanup(func() { _ = dp.Teardown() })
@@ -680,6 +681,27 @@ func TestTunnel(t *testing.T) {
 	default:
 		t.Fatalf("unknown role %q", role)
 	}
+}
+
+// cniMasquerade translates, as kindnet does and as the AWS VPC CNI does for
+// addresses outside the VPC, every flow to a destination not on this host
+// to the address of the device it leaves by.
+func cniMasquerade(t *testing.T) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(`table ip cni {
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		fib daddr type != local masquerade
+	}
+}
+`)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install the CNI's masquerade: %v: %s", err, out)
+	}
+	t.Cleanup(func() {
+		_ = exec.CommandContext(context.Background(), "nft", "delete", "table", "ip", "cni").Run()
+	})
 }
 
 // wireGuardPeerAddrs are the addresses the peers of a WireGuard device may
