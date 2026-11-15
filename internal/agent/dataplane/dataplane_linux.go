@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/go-logr/logr"
 	"github.com/google/nftables"
 	"github.com/vishvananda/netlink"
@@ -60,6 +61,8 @@ type Dataplane struct {
 	// The last read of the host's rules for the agent's mark bits.
 	marksChecked time.Time
 	marksErr     error
+	// The probe responder this process attached.
+	respond *ebpf.Collection
 }
 
 // New checks the configuration; nothing is changed until Apply.
@@ -541,7 +544,17 @@ func (d *Dataplane) applyGateway(want *agent.Desired, underlayMTU int) (Status, 
 	if lo, err := nh.LinkByName("lo"); err == nil {
 		_ = nh.LinkSetUp(lo)
 	}
+	st, err := d.applySlot(nh, want)
+	if err != nil {
+		// Stop answering probes: what serves is unknown.
+		_ = d.applyResponder(nh, want.Nodes, false)
+		return st, err
+	}
+	return st, d.applyResponder(nh, want.Nodes, st.Serving)
+}
 
+// applySlot puts the slot interface to work in the gateway namespace.
+func (d *Dataplane) applySlot(nh *netlink.Handle, want *agent.Desired) (Status, error) {
 	slot, st, err := d.claimSlot(nh, want.Gateway.MAC)
 	if err != nil || slot == nil {
 		return st, err
@@ -727,11 +740,13 @@ func (d *Dataplane) configureSlot(nh *netlink.Handle, slot netlink.Link, want *a
 // interface is still inside it: removing it would hand the interface back to
 // the host. The controller detaches the interface first.
 func (d *Dataplane) removeGateway() error {
+	// The probe responder goes with the link.
 	if l, err := netlink.LinkByName(VethHost); err == nil {
 		if err := netlink.LinkDel(l); err != nil {
 			return fmt.Errorf("remove %s: %w", VethHost, err)
 		}
 	}
+	d.closeResponder()
 	if d.gw == nil {
 		return nil
 	}
@@ -782,6 +797,7 @@ func (d *Dataplane) Teardown() error {
 	if err := os.Remove(d.cfg.StateDir + "/" + keyFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("remove WireGuard key: %w", err))
 	}
+	errs = append(errs, SaveRole(d.cfg.StateDir, ""))
 	if _, err := netlink.ConntrackDeleteFilters(netlink.ConntrackTable, unix.AF_INET, anyMark{d.cfg.MarkMask}); err != nil {
 		errs = append(errs, fmt.Errorf("flush steered flows: %w", err))
 	}

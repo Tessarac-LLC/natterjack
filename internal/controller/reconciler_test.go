@@ -319,6 +319,89 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 	}
 }
 
+func TestAgentRolloutKeepsTheSlot(t *testing.T) {
+	h := newHarness(t, "rollout")
+	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "rollout"}})
+	h.node("ro-1", "us-east-2a")
+	h.node("ro-2", "us-east-2a")
+	h.agent("rollout", "ro-1")
+	h.agent("rollout", "ro-2")
+	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", Tags: map[string]string{}}
+	h.reconcile()
+	old := h.pod("agent-ro-1")
+	old.Status.Conditions = append(old.Status.Conditions, corev1.PodCondition{Type: v1.ConditionGatewayReady, Status: corev1.ConditionTrue, Message: v1.GatewayReadyMessage("eni-1")})
+	if err := k8s.Status().Update(h.ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile()
+	status := func() v1.SlotStatus {
+		t.Helper()
+		p := &v1.EgressPool{}
+		if err := k8s.Get(h.ctx, client.ObjectKey{Name: "rollout"}, p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Status.Slots[0]
+	}
+	if s := status(); s.State != v1.SlotActive || s.Node != "ro-1" {
+		t.Fatalf("status %+v", s)
+	}
+
+	// The DaemonSet deletes the old pod. With no kubelet it stays
+	// terminating, as it does while the agent shuts down.
+	if err := k8s.Delete(h.ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(5 * time.Second)
+	h.reconcile()
+	if h.cloud.instanceOf("eni-1") != "i-ro-1" {
+		t.Fatal("the slot moved while the agent restarted")
+	}
+	if s := status(); s.State != v1.SlotActive || !strings.Contains(s.Reason, "restarting") {
+		t.Fatalf("status %+v", s)
+	}
+	if p := h.pod("agent-ro-1"); p.Annotations[v1.AnnotationGateway] == "" {
+		t.Fatal("the terminating agent's assignment was cleared")
+	}
+
+	// Its replacement gets the assignment.
+	repl := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-ro-1-new", Namespace: ns, Labels: map[string]string{"app": "agent-rollout"}},
+		Spec:       corev1.PodSpec{NodeName: "ro-1", Containers: []corev1.Container{{Name: "agent", Image: "agent"}}},
+	}
+	h.create(repl)
+	repl.Status.Phase = corev1.PodRunning
+	if err := k8s.Status().Update(h.ctx, repl); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(5 * time.Second)
+	h.reconcile()
+	if h.cloud.instanceOf("eni-1") != "i-ro-1" || h.pod("agent-ro-1-new").Annotations[v1.AnnotationGateway] == "" {
+		t.Fatal("the replacement agent did not take over the slot")
+	}
+	// While it comes up on the slot, the slot stays Active: the gateway's
+	// kernel state carried its traffic throughout.
+	for range 2 {
+		if s := status(); s.State != v1.SlotActive || s.Node != "ro-1" {
+			t.Fatalf("status while the replacement comes up %+v", s)
+		}
+		h.reconcile()
+	}
+
+	// An agent that does not come back within the grace loses the slot.
+	if err := k8s.Delete(h.ctx, repl); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcile()
+	if h.cloud.instanceOf("eni-1") != "i-ro-1" {
+		t.Fatal("the slot moved at once")
+	}
+	h.now = h.now.Add(AgentRestartGrace + time.Second)
+	h.reconcile()
+	if h.cloud.instanceOf("eni-1") == "i-ro-1" {
+		t.Fatal("the slot stayed past the grace")
+	}
+}
+
 func TestCloudErrorNamesTheIdentity(t *testing.T) {
 	h := newHarness(t, "errors")
 	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "errors"}})

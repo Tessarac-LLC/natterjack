@@ -90,7 +90,6 @@ type fakeDataplane struct {
 	applied []agent.Desired
 	status  dataplane.Status
 	fail    error
-	conns   []net.PacketConn
 }
 
 func (f *fakeDataplane) Apply(want *agent.Desired) (dataplane.Status, error) {
@@ -101,16 +100,6 @@ func (f *fakeDataplane) Apply(want *agent.Desired) (dataplane.Status, error) {
 }
 
 func (*fakeDataplane) WireGuardKey() string { return "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=" }
-
-func (f *fakeDataplane) ListenProbe(ctx context.Context) (net.PacketConn, error) {
-	c, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp4", "127.0.0.1:0")
-	if err == nil {
-		f.mu.Lock()
-		f.conns = append(f.conns, c)
-		f.mu.Unlock()
-	}
-	return c, err
-}
 
 func (*fakeDataplane) DialGateway(context.Context, string, string) (net.Conn, error) {
 	return nil, errors.New("not used")
@@ -263,20 +252,6 @@ func TestGatewayLifecycle(t *testing.T) {
 	reconcileOnce()
 	want(corev1.ConditionTrue, "Serving", v1.GatewayReadyMessage("eni-1"))
 
-	// It answers probes while serving.
-	c, err := (&net.Dialer{}).DialContext(t.Context(), "udp4", dp.conns[0].LocalAddr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = c.Close() }()
-	if _, err := c.Write([]byte("NJP100000001")); err != nil {
-		t.Fatal(err)
-	}
-	_ = c.SetReadDeadline(time.Now().Add(time.Second))
-	if b := make([]byte, 32); func() bool { n, err := c.Read(b); return err != nil || n != 12 }() {
-		t.Fatal("a serving gateway did not answer a probe")
-	}
-
 	// One failed self-test is not enough to leave service; three are.
 	boom := errors.New("checkip unreachable")
 	tests <- boom
@@ -330,8 +305,8 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 	reconcileOnce()
 	want(corev1.ConditionFalse, "NotAssigned", "")
-	if dp.last().Gateway != nil || a.responder != nil {
-		t.Fatal("an unassigned agent kept its gateway role or probe responder")
+	if dp.last().Gateway != nil {
+		t.Fatal("an unassigned agent kept its gateway role")
 	}
 
 	// A failed apply is reported and retried.
@@ -392,5 +367,110 @@ func TestNonGatewayReportsOnlyItsDataPath(t *testing.T) {
 	}
 	if c := podCondition(t, self.Name, v1.ConditionDataplaneReady); c == nil || c.Status != corev1.ConditionTrue {
 		t.Fatalf("data path condition %+v, want true after recovery", c)
+	}
+}
+
+func TestRestartedAgentKeepsServing(t *testing.T) {
+	node(t, "gw-r", "10.0.1.70")
+	gw := v1.Gateway{Pool: "web-r", SlotID: "eni-r", MAC: "02:00:00:00:00:0a", PrivateIP: "10.0.9.30", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.30", Tunnel: v1.TunnelGeneve}
+	old := agentPod(t, "gw-r", &gw)
+	dir := t.TempDir()
+	tests := make(selfTests)
+	newAgent := func(pod, inherited string, until time.Time) (*Agent, *fakeDataplane) {
+		marks, err := agent.NewMarks(0x00ff0000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dp := &fakeDataplane{status: dataplane.Status{Serving: true}}
+		a := &Agent{
+			Client: k8s, Agents: k8s, AgentSelector: labels.SelectorFromSet(agentLabels),
+			Dataplane: dp, Marks: marks, Prober: agent.NewProber(func(context.Context, uint32, netip.AddrPort) (net.Conn, error) {
+				return nil, errors.New("no tunnel in this test")
+			}, netip.AddrPort{}),
+			Node: "gw-r", Namespace: ns, Pod: pod, Excluded: agent.DefaultExcluded,
+			SelfTestURL: "https://checkip.example", SelfTestInterval: time.Hour, SelfTest: tests.run,
+			Resync: time.Minute, Log: logr.Discard(), StateDir: dir, Inherited: inherited, InheritUntil: until,
+		}
+		t.Cleanup(a.Close)
+		if _, err := a.Reconcile(t.Context(), reconcile.Request{}); err != nil {
+			t.Fatal(err)
+		}
+		return a, dp
+	}
+	serving := func(dp *fakeDataplane) string {
+		t.Helper()
+		if g := dp.last().Gateway; g != nil {
+			return g.SlotID
+		}
+		return ""
+	}
+
+	// The serving agent records its assignment.
+	_, dp := newAgent(old.Name, "", time.Time{})
+	if got := serving(dp); got != "eni-r" {
+		t.Fatalf("serving %q, want eni-r", got)
+	}
+	saved, err := dataplane.LoadRole(dir)
+	if err != nil || saved != old.Annotations[v1.AnnotationGateway] {
+		t.Fatalf("saved assignment %q, %v; want the pod's", saved, err)
+	}
+
+	// Its replacement has no assignment yet and keeps serving the slot.
+	fresh := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "agent-gw-r-new", Labels: map[string]string{}},
+		Spec:       corev1.PodSpec{NodeName: "gw-r", HostNetwork: true, Containers: []corev1.Container{{Name: "agent", Image: "agent"}}},
+	}
+	for k, v := range agentLabels {
+		fresh.Labels[k] = v
+	}
+	create(t, fresh)
+	a, dp := newAgent(fresh.Name, saved, time.Now().Add(time.Minute))
+	if got := serving(dp); got != "eni-r" {
+		t.Fatalf("the new agent serves %q, want the inherited eni-r", got)
+	}
+	if got, _ := dataplane.LoadRole(dir); got != saved {
+		t.Fatalf("the new agent saved %q, want the inherited assignment kept", got)
+	}
+
+	// The controller's assignment on the new pod replaces the inherited one.
+	moved := gw
+	moved.SlotID, moved.PublicIP = "eni-r2", "203.0.113.31"
+	raw, err := json.Marshal(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assign := func(gateway, pool, role string) {
+		t.Helper()
+		if err := k8s.Get(t.Context(), client.ObjectKeyFromObject(fresh), fresh); err != nil {
+			t.Fatal(err)
+		}
+		fresh.Labels[v1.LabelGateway], fresh.Labels[v1.LabelPool] = gateway, pool
+		fresh.Annotations = map[string]string{}
+		if role != "" {
+			fresh.Annotations[v1.AnnotationGateway] = role
+		}
+		if err := k8s.Update(t.Context(), fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assign("true", moved.Pool, string(raw))
+	if _, err := a.Reconcile(t.Context(), reconcile.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := serving(dp); got != "eni-r2" {
+		t.Fatalf("serving %q after the controller assigned eni-r2", got)
+	}
+	if a.Inherited != "" {
+		t.Fatal("the inherited assignment outlived the controller's")
+	}
+
+	// An inheritance past its deadline is not served, and the record goes.
+	assign("false", "", "")
+	_, dp = newAgent(fresh.Name, saved, time.Now().Add(-time.Second))
+	if got := serving(dp); got != "" {
+		t.Fatalf("an expired inheritance still serves %q", got)
+	}
+	if got, _ := dataplane.LoadRole(dir); got != "" {
+		t.Fatalf("the record %q outlived the slot", got)
 	}
 }

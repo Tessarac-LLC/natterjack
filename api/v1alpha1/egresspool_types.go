@@ -37,6 +37,9 @@ const (
 	// ConditionGatewayReady is the pod condition a gateway agent sets once its
 	// slot carries traffic and its self-test passes. GatewayReady reads it.
 	ConditionGatewayReady corev1.PodConditionType = Group + "/gateway-ready"
+	// ReasonSelfTestPending is the gateway-ready reason while a gateway that
+	// carries its slot waits for its first self-test through it.
+	ReasonSelfTestPending = "SelfTestPending"
 	// ConditionDataplaneReady is the pod condition every agent sets: true once
 	// its node's data path is applied, false with the error while it is not.
 	ConditionDataplaneReady corev1.PodConditionType = Group + "/dataplane-ready"

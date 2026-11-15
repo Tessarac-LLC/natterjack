@@ -50,6 +50,12 @@ type Node struct {
 	Disruption string
 	// Agent is the node's agent pod, or nil when none runs there.
 	Agent *Agent
+	// AgentGone is when the node was first seen without a running agent,
+	// while Agent is nil. Zero means not known.
+	AgentGone time.Time
+	// LastServed is the slot the node's last running agent reported ready,
+	// or empty.
+	LastServed string
 }
 
 // Agent is the agent pod on a node.
@@ -61,6 +67,13 @@ type Agent struct {
 	GatewayReady bool
 	// Gateway is the assignment currently written on the pod, if any.
 	Gateway *v1.Gateway
+	// Serves is the slot the agent reports serving, whatever is written on
+	// the pod: a restarted agent serves its saved assignment before the
+	// controller writes it again.
+	Serves string
+	// Pending reports whether the agent has yet to say whether it serves:
+	// no gateway condition yet, or waiting for its first self-test.
+	Pending bool
 	// DrainStarted is when the controller asked this gateway to drain.
 	DrainStarted time.Time
 }
@@ -80,7 +93,11 @@ type Input struct {
 	// Avoid are nodes that recently refused an attach (for example, at their
 	// interface limit), with the reason.
 	Avoid map[string]string
-	Now   time.Time
+	// AgentGrace is how long a slot stays on a node whose agent pod is being
+	// replaced, as in a rolling update. The kernel keeps serving the slot
+	// meanwhile.
+	AgentGrace time.Duration
+	Now        time.Time
 }
 
 // Detach removes a slot from its node.
@@ -110,7 +127,7 @@ type Plan struct {
 	Pools map[string][]v1.SlotStatus
 	// Unmatched are slots of this cluster that no pool claims.
 	Unmatched []string
-	// RequeueAfter is when a drain window ends, or zero.
+	// RequeueAfter is when a drain window or a restart grace ends, or zero.
 	RequeueAfter time.Duration
 }
 
@@ -225,7 +242,7 @@ func (pp *planner) run(slots []cloud.Slot, owners map[string][]string) []v1.Slot
 	// serving holds slots that stay on a healthy node, per zone, in priority
 	// order; any above the zone cap are drained below.
 	serving := map[string][]cloud.Slot{}
-	var free []cloud.Slot
+	var free, held []cloud.Slot
 	for _, s := range slots {
 		problems := pp.problems(s, owners)
 		node := pp.byInstance[s.Instance]
@@ -241,6 +258,8 @@ func (pp *planner) run(slots []cloud.Slot, owners map[string][]string) []v1.Slot
 		case s.Instance != "" && !node.Ready:
 			pp.detach(s, node.Name, true, fmt.Sprintf("node %s is not ready", node.Name))
 			set(s, v1.SlotPending, "", fmt.Sprintf("moving off node %s, which is not ready", node.Name))
+		case s.Instance != "" && node.Agent == nil && pp.restarting(node):
+			held = append(held, s)
 		case s.Instance != "" && node.Agent == nil:
 			pp.detach(s, node.Name, false, fmt.Sprintf("node %s has no agent", node.Name))
 			set(s, v1.SlotPending, "", fmt.Sprintf("moving off node %s, which has no agent", node.Name))
@@ -258,6 +277,18 @@ func (pp *planner) run(slots []cloud.Slot, owners map[string][]string) []v1.Slot
 	}
 
 	capacity := map[string]int{}
+	for _, s := range held {
+		node := pp.byInstance[s.Instance]
+		capacity[s.Zone]++
+		pp.served[node.Name] = s.ID
+		left := node.AgentGone.Add(pp.in.AgentGrace).Sub(pp.in.Now)
+		pp.requeue(left)
+		state := v1.SlotAttaching
+		if node.LastServed == s.ID {
+			state = v1.SlotActive
+		}
+		set(s, state, node.Name, fmt.Sprintf("the agent on node %s is restarting; the slot moves if it is not back in %s", node.Name, left.Round(time.Second)))
+	}
 	for _, zone := range slices.Sorted(maps.Keys(serving)) {
 		for _, s := range serving[zone] {
 			node := pp.byInstance[s.Instance]
@@ -273,7 +304,7 @@ func (pp *planner) run(slots []cloud.Slot, owners map[string][]string) []v1.Slot
 			capacity[zone]++
 			pp.serve(s, node)
 			reason := strings.Join(pp.problems(s, owners), "; ")
-			if node.Agent.GatewayReady && node.Agent.Gateway != nil && node.Agent.Gateway.SlotID == s.ID {
+			if node.Agent.GatewayReady && node.Agent.Gateway != nil && node.Agent.Gateway.SlotID == s.ID || resuming(node, s.ID) {
 				set(s, v1.SlotActive, node.Name, reason)
 			} else {
 				set(s, v1.SlotAttaching, node.Name, joinReason("waiting for the gateway to report ready", reason))
@@ -361,9 +392,7 @@ func (pp *planner) drain(s cloud.Slot, n *Node, why string, set func(cloud.Slot,
 	window := time.Duration(pp.pool.Spec.DrainSeconds) * time.Second
 	if left := started.Add(window).Sub(pp.in.Now); left > 0 {
 		pp.plan.Agents[n.Agent.Pod] = AgentWant{Gateway: pp.gateway(s), DrainStarted: started}
-		if pp.plan.RequeueAfter == 0 || left < pp.plan.RequeueAfter {
-			pp.plan.RequeueAfter = left
-		}
+		pp.requeue(left)
 		set(s, v1.SlotDraining, n.Name, fmt.Sprintf("%s; moving in %s", why, left.Round(time.Second)))
 		return
 	}
@@ -371,8 +400,29 @@ func (pp *planner) drain(s cloud.Slot, n *Node, why string, set func(cloud.Slot,
 	set(s, v1.SlotPending, "", "moved off node "+n.Name+": "+why)
 }
 
+// restarting reports whether a node without an agent keeps its slot: its
+// agent went away within the grace period and the node is not leaving. An
+// agent that never comes back, or one on a node going away, loses the slot.
+func (pp *planner) restarting(n *Node) bool {
+	return !n.AgentGone.IsZero() && pp.in.Now.Sub(n.AgentGone) < pp.in.AgentGrace && n.Disruption == ""
+}
+
+func (pp *planner) requeue(after time.Duration) {
+	if pp.plan.RequeueAfter == 0 || after < pp.plan.RequeueAfter {
+		pp.plan.RequeueAfter = after
+	}
+}
+
 func (pp *planner) detach(s cloud.Slot, node string, force bool, reason string) {
 	pp.plan.Detaches = append(pp.plan.Detaches, Detach{Slot: s.ID, Node: node, Force: force, Reason: reason})
+}
+
+// resuming reports whether n's agent restarted while serving slot and is
+// coming back up on it. Its kernel state carried the traffic throughout, so
+// the slot stays Active unless the new agent reports otherwise.
+func resuming(n *Node, slot string) bool {
+	a := n.Agent
+	return n.LastServed == slot && (a.Gateway == nil || a.Gateway.SlotID == slot) && (a.Serves == slot || a.Serves == "" && a.Pending)
 }
 
 func (pp *planner) serve(s cloud.Slot, n *Node) {

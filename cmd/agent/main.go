@@ -55,6 +55,11 @@ import (
 	"github.com/Tessarac-LLC/natterjack/internal/version"
 )
 
+// inheritFor bounds how long a new agent serves its predecessor's slot
+// without an assignment of its own. The controller holds the slot for a
+// restarting agent for a minute and assigns it as soon as the pod is up.
+const inheritFor = 2 * time.Minute
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "natterjack agent:", err)
@@ -152,6 +157,10 @@ func run() error {
 	}
 	marks.Restore(saved)
 	dp.SetMarks(saved)
+	inherited, err := dataplane.LoadRole(cfg.StateDir)
+	if err != nil {
+		return err //nolint:wrapcheck // names the file
+	}
 
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -231,6 +240,9 @@ func run() error {
 		SelfTest:         agent.SelfTest,
 		Resync:           *resync,
 		Log:              log,
+		StateDir:         cfg.StateDir,
+		Inherited:        inherited,
+		InheritUntil:     time.Now().Add(inheritFor),
 	}
 	if err := a.SetupWithManager(mgr, agents); err != nil {
 		return err //nolint:wrapcheck // already wrapped

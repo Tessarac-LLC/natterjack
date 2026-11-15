@@ -52,26 +52,6 @@ func DialProbe(ctx context.Context, mark uint32, dst netip.AddrPort) (net.Conn, 
 
 var errNoGateway = errors.New("this node serves no slot")
 
-// ListenProbe opens the probe responder's socket inside the gateway
-// namespace. The socket stays in that namespace for its lifetime.
-func (d *Dataplane) ListenProbe(ctx context.Context) (net.PacketConn, error) {
-	gw := d.Gateway()
-	if gw == nil {
-		return nil, errNoGateway
-	}
-	var c net.PacketConn
-	addr := netip.AddrPortFrom(d.cfg.GatewayAddr(), d.cfg.ProbePort).String()
-	err := gw.Do(func() error {
-		var err error
-		c, err = (&net.ListenConfig{}).ListenPacket(ctx, "udp4", addr)
-		return err //nolint:wrapcheck // wrapped below
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listen for probes on %s in the gateway namespace: %w", addr, err)
-	}
-	return c, nil
-}
-
 // DialGateway connects from inside the gateway namespace, so the connection
 // leaves through the slot like gateway traffic. addr must be an IP address
 // and port: name resolution stays in the host namespace.

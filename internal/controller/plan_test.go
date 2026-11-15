@@ -188,6 +188,83 @@ func TestNodeGoneForcesDetach(t *testing.T) {
 	}
 }
 
+func TestRestartingAgentKeepsSlot(t *testing.T) {
+	s := attached(slot("eni-1", "a"), "i-n1")
+	n := node("n1", "a", 10)
+	n.Agent, n.AgentGone, n.LastServed = nil, t0.Add(-20*time.Second), "eni-1"
+	in := Input{
+		Pools: pool(v1.EgressPoolSpec{MaxGatewaysPerZone: ptr.To[int32](1)}), Slots: []cloud.Slot{s, slot("eni-2", "a")},
+		Nodes: []Node{n, node("n2", "a", 99)}, Now: t0, AgentGrace: time.Minute,
+	}
+	p := Compute(in)
+	if len(p.Detaches)+len(p.Attaches) != 0 {
+		t.Fatalf("a restarting agent must not lose its slot: %+v %+v", p.Detaches, p.Attaches)
+	}
+	expect(t, state(t, p, "default", "eni-1"), v1.SlotActive, "agent on node n1 is restarting; the slot moves if it is not back in 40s")
+	expect(t, state(t, p, "default", "eni-2"), v1.SlotSpare, "")
+	if p.RequeueAfter != 40*time.Second {
+		t.Fatalf("requeue %s, want the end of the grace", p.RequeueAfter)
+	}
+
+	// The new agent pod is up before the controller assigns it again. The
+	// slot stays Active while it comes back on the same slot, and is
+	// assigned to it; anything else it reports ends that.
+	for _, tc := range []struct {
+		name   string
+		agent  Agent
+		active bool
+	}{
+		{name: "no condition yet", agent: Agent{Pending: true}, active: true},
+		{name: "self-test pending", agent: Agent{Pending: true, Gateway: &v1.Gateway{SlotID: "eni-1"}}, active: true},
+		{name: "serving its saved slot", agent: Agent{Serves: "eni-1"}, active: true},
+		{name: "serving another slot", agent: Agent{Serves: "eni-9"}},
+		{name: "self-test failed", agent: Agent{Gateway: &v1.Gateway{SlotID: "eni-1"}}},
+		{name: "not assigned", agent: Agent{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := in
+			in.Nodes = slices.Clone(in.Nodes)
+			a := tc.agent
+			a.Pod, a.Ready = "agent-n1-new", true
+			in.Nodes[0].Agent, in.Nodes[0].AgentGone = &a, time.Time{}
+			p := Compute(in)
+			if len(p.Detaches)+len(p.Attaches) != 0 {
+				t.Fatalf("the restarted agent lost its slot: %+v %+v", p.Detaches, p.Attaches)
+			}
+			if p.Agents["agent-n1-new"].Gateway.SlotID != "eni-1" {
+				t.Fatalf("the restarted agent is not assigned its slot: %+v", p.Agents)
+			}
+			got := state(t, p, "default", "eni-1").State
+			if (got == v1.SlotActive) != tc.active {
+				t.Fatalf("state %s, want active %v", got, tc.active)
+			}
+		})
+	}
+
+	// Never served: still kept, but not reported active.
+	in.Nodes[0].LastServed = ""
+	expect(t, state(t, Compute(in), "default", "eni-1"), v1.SlotAttaching, "restarting")
+
+	// Grace over: the slot moves.
+	in.Now = t0.Add(41 * time.Second)
+	if p := Compute(in); len(p.Detaches) != 1 || p.Detaches[0].Slot != "eni-1" {
+		t.Fatalf("detaches after the grace %+v", p.Detaches)
+	}
+
+	// A node going away does not wait.
+	in.Now = t0
+	in.Nodes[0].Disruption = "node n1 is cordoned"
+	if p := Compute(in); len(p.Detaches) != 1 {
+		t.Fatalf("detaches on a cordoned node %+v", p.Detaches)
+	}
+
+	// Nor does a node that is not ready.
+	in.Nodes[0].Disruption, in.Nodes[0].Ready = "", false
+	if p := Compute(in); len(p.Detaches) != 1 || !p.Detaches[0].Force {
+		t.Fatalf("detaches on a failed node %+v", p.Detaches)
+	}
+}
+
 func TestNodeWithoutAgentGivesUpSlot(t *testing.T) {
 	s := attached(slot("eni-1", "a"), "i-n1")
 	n := node("n1", "a", 10)

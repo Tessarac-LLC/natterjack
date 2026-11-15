@@ -91,7 +91,7 @@ func run(configPath, listen, out string, detachDelay time.Duration) error {
 		errs <- whoamiSrv.Serve(tls.NewListener(tlsLn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}))
 	}()
 	go func() {
-		errs <- (&http.Server{Handler: http.HandlerFunc(whoami), ReadHeaderTimeout: 10 * time.Second}).Serve(plainLn)
+		errs <- (&http.Server{Handler: internetHandler(), ReadHeaderTimeout: 10 * time.Second}).Serve(plainLn)
 	}()
 	apiLn, err := (&net.ListenConfig{}).Listen(ctx, "tcp", listen)
 	if err != nil {

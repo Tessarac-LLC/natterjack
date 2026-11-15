@@ -59,9 +59,6 @@ func (*GatewayNS) Do(func() error) error { return errLinuxOnly }
 // DialProbe always fails off Linux.
 func DialProbe(context.Context, uint32, netip.AddrPort) (net.Conn, error) { return nil, errLinuxOnly }
 
-// ListenProbe always fails off Linux.
-func (*Dataplane) ListenProbe(context.Context) (net.PacketConn, error) { return nil, errLinuxOnly }
-
 // DialGateway always fails off Linux.
 func (*Dataplane) DialGateway(context.Context, string, string) (net.Conn, error) {
 	return nil, errLinuxOnly

@@ -419,6 +419,57 @@ from_is steered-a 203.0.113.1 198.51.100.200 || fail "an excluded destination wa
 [[ "$(whoami_from "$pod_a")" == 198.51.100.200 ]] || fail "node traffic was steered without nodeTraffic"
 echo "steered-a: $(http steered-a 203.0.113.9), steered-b: $(http steered-b 203.0.113.9), plain-a: $(http plain-a 203.0.113.9)"
 
+step "agent restart"
+# Every agent restarts, as in an upgrade. The gateways' kernel state stays,
+# so the slots stay where they are, connections through them live on, and
+# new flows keep leaving from their own zone's Elastic IP throughout.
+# stream sends a line every 200ms; wget gives up after 3s without one.
+stream() {
+	kubectl -n app exec "$1" -c c -- wget -qO- -T 3 "http://203.0.113.9/stream?seconds=900" \
+		>"$work/stream-$1.out" 2>"$work/stream-$1.err"
+}
+lines() { wc -l <"$work/stream-$1.out" | tr -d ' '; }
+stream steered-a &
+stream_a=$!
+stream steered-b &
+stream_b=$!
+eventually 30 "steered-a's stream started" test -s "$work/stream-steered-a.out"
+eventually 30 "steered-b's stream started" test -s "$work/stream-steered-b.out"
+old_agents="$(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.uid}')"
+kubectl -n "$ns" rollout restart "ds/$ds" >/dev/null
+kubectl -n "$ns" rollout status "ds/$ds" --timeout=600s >/dev/null &
+rollout=$!
+checks=0
+while kill -0 "$rollout" 2>/dev/null; do
+	for s in "eni-a1 $gw_a" "eni-b1 $gw_b"; do
+		read -r id want <<<"$s"
+		[[ "$(slot "$id" state)" == Active && "$(slot "$id" node)" == "$want" ]] ||
+			fail "$id left $want during the restart: $(slot "$id" state) on $(slot "$id" node)"
+	done
+	from_is steered-a 203.0.113.9 198.51.100.11 || fail "a new flow from steered-a left zone-a's Elastic IP during the restart: $(http steered-a 203.0.113.9)"
+	from_is steered-b 203.0.113.9 198.51.100.21 || fail "a new flow from steered-b left zone-b's Elastic IP during the restart: $(http steered-b 203.0.113.9)"
+	checks=$((checks + 1))
+	sleep 1
+done
+wait "$rollout" || fail "the agents did not roll out again"
+for uid in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.uid}'); do
+	[[ " $old_agents " != *" $uid "* ]] || fail "agent pod $uid was not restarted"
+done
+eventually 120 "the zone-a gateway passes its self-test after the restart" gw_ready "$gw_a"
+eventually 60 "the zone-b gateway passes its self-test after the restart" gw_ready "$gw_b"
+for p in steered-a steered-b; do
+	before="$(lines "$p")"
+	sleep 3
+	pid=stream_${p#steered-}
+	kill -0 "${!pid}" 2>/dev/null || fail "$p's connection through its gateway ended in the restart: $(tail -n 2 "$work/stream-$p.out") $(cat "$work/stream-$p.err")"
+	(($(lines "$p") > before)) || fail "$p's connection through its gateway stalled after the restart"
+done
+grep -qv '^198\.51\.100\.11 ' "$work/stream-steered-a.out" && fail "steered-a's connection changed address: $(grep -v '^198\.51\.100\.11 ' "$work/stream-steered-a.out" | head -n 1)"
+grep -qv '^198\.51\.100\.21 ' "$work/stream-steered-b.out" && fail "steered-b's connection changed address: $(grep -v '^198\.51\.100\.21 ' "$work/stream-steered-b.out" | head -n 1)"
+kill "$stream_a" "$stream_b" 2>/dev/null || true
+wait "$stream_a" "$stream_b" 2>/dev/null || true
+echo "every agent restarted; slots stayed put through $checks checks, and both connections lived on ($(lines steered-a) and $(lines steered-b) lines)"
+
 step "failover"
 # The zone-a gateway node dies without warning. Within the probes' window
 # (200ms x 5) new flows from zone-a take zone-b's gateway; the slot then
@@ -442,7 +493,9 @@ kubectl delete egresspolicy -n app egress >/dev/null
 kubectl delete egresspool default --wait=true --timeout=120s >/dev/null || fail "the pool was not deleted"
 none_attached() { ! grep -q '"eni-' <<<"$(fake_state)"; }
 eventually 120 "every slot is detached once the pool is gone" none_attached
-helm uninstall "$release" -n "$ns" --wait --timeout 180s >/dev/null || fail "uninstall failed"
+# Helm names the resource it could not delete only in its debug output.
+helm uninstall "$release" -n "$ns" --wait --timeout 180s --debug >"$work/uninstall.log" 2>&1 ||
+	fail "uninstall failed: $(grep -iE 'error|fail' "$work/uninstall.log" | tail -n 20)"
 for n in $(kind get nodes --name "$cluster"); do
 	if docker exec "$n" sh -c 'nft list tables; ip link; ip rule' | grep -E 'natterjack|nj(gw|tun|wg|d0)'; then
 		fail "$n still holds Natterjack kernel objects"
