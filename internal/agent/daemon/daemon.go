@@ -58,6 +58,8 @@ type Dataplane interface {
 	Apply(want *agent.Desired) (dataplane.Status, error)
 	ListenProbe(ctx context.Context) (net.PacketConn, error)
 	DialGateway(ctx context.Context, network, addr string) (net.Conn, error)
+	// WireGuardKey is the node's WireGuard public key.
+	WireGuardKey() string
 }
 
 // SelfTester checks that traffic dialed through dial leaves from want.
@@ -79,8 +81,8 @@ type Agent struct {
 	// Client reads this node's pods, all nodes, namespaces, policies and
 	// pools from the cache.
 	Client client.Client
-	// Gateways reads the gateway agent pods.
-	Gateways client.Reader
+	// Agents reads the agent pods: gateways, and every node's WireGuard key.
+	Agents client.Reader
 	// AgentSelector selects agent pods; only they can be gateways.
 	AgentSelector labels.Selector
 	Dataplane     Dataplane
@@ -125,9 +127,9 @@ func (a *Agent) Ready(*http.Request) error {
 	return nil
 }
 
-// SetupWithManager watches everything the computation reads. gateways is the
-// cache behind a.Gateways.
-func (a *Agent) SetupWithManager(mgr ctrl.Manager, gateways cache.Cache) error {
+// SetupWithManager watches everything the computation reads. agents is the
+// cache behind a.Agents.
+func (a *Agent) SetupWithManager(mgr ctrl.Manager, agents cache.Cache) error {
 	a.wake = make(chan event.GenericEvent, 1)
 	all := handler.EnqueueRequestsFromMapFunc(func(context.Context, client.Object) []reconcile.Request {
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: a.Node}}}
@@ -149,7 +151,7 @@ func (a *Agent) SetupWithManager(mgr ctrl.Manager, gateways cache.Cache) error {
 		Watches(&v1.EgressPolicy{}, all).
 		Watches(&v1.ClusterEgressPolicy{}, all).
 		Watches(&v1.EgressPool{}, all).
-		WatchesRawSource(source.Kind[client.Object](gateways, &corev1.Pod{}, all)).
+		WatchesRawSource(source.Kind[client.Object](agents, &corev1.Pod{}, all)).
 		WatchesRawSource(source.Channel(probes, all)).
 		WatchesRawSource(source.Channel(a.wake, all)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1, RateLimiter: retry.Limiter(a.Resync)}).
@@ -166,6 +168,9 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// Publish the key first: gateways of an encrypted pool accept this
+	// node's traffic only once they know it.
+	a.setCondition(ctx, s.Self, v1.ConditionWireGuardKey, true, corev1.ConditionTrue, "Published", a.Dataplane.WireGuardKey())
 	d, problems := agent.Compute(s, a.Marks)
 	a.report(problems)
 	problemCount.Set(float64(len(problems)))
@@ -215,13 +220,13 @@ func (a *Agent) snapshot(ctx context.Context) (*agent.Snapshot, []v1.EgressPool,
 	}
 
 	var (
-		nodes    corev1.NodeList
-		pods     corev1.PodList
-		nss      corev1.NamespaceList
-		pols     v1.EgressPolicyList
-		cpols    v1.ClusterEgressPolicyList
-		pools    v1.EgressPoolList
-		gateways corev1.PodList
+		nodes  corev1.NodeList
+		pods   corev1.PodList
+		nss    corev1.NamespaceList
+		pols   v1.EgressPolicyList
+		cpols  v1.ClusterEgressPolicyList
+		pools  v1.EgressPoolList
+		agents corev1.PodList
 	)
 	for _, l := range []struct {
 		list client.ObjectList
@@ -231,8 +236,8 @@ func (a *Agent) snapshot(ctx context.Context) (*agent.Snapshot, []v1.EgressPool,
 			return nil, nil, fmt.Errorf("list %s: %w", l.what, err)
 		}
 	}
-	if err := a.Gateways.List(ctx, &gateways, client.InNamespace(a.Namespace), client.MatchingLabels{v1.LabelGateway: "true"}); err != nil {
-		return nil, nil, fmt.Errorf("list gateways: %w", err)
+	if err := a.Agents.List(ctx, &agents, client.InNamespace(a.Namespace), client.MatchingLabelsSelector{Selector: a.AgentSelector}); err != nil {
+		return nil, nil, fmt.Errorf("list agent pods: %w", err)
 	}
 	s.Nodes = nodes.Items
 	for i := range pods.Items {
@@ -240,9 +245,14 @@ func (a *Agent) snapshot(ctx context.Context) (*agent.Snapshot, []v1.EgressPool,
 			s.Pods = append(s.Pods, pods.Items[i])
 		}
 	}
-	for i := range gateways.Items {
-		if a.AgentSelector.Matches(labels.Set(gateways.Items[i].Labels)) {
-			s.Gateways = append(s.Gateways, gateways.Items[i])
+	for i := range agents.Items {
+		p := &agents.Items[i]
+		if !a.AgentSelector.Matches(labels.Set(p.Labels)) {
+			continue
+		}
+		s.Agents = append(s.Agents, *p)
+		if p.Labels[v1.LabelGateway] == "true" {
+			s.Gateways = append(s.Gateways, *p)
 		}
 	}
 	if s.Self != nil && !a.AgentSelector.Matches(labels.Set(s.Self.Labels)) {

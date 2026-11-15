@@ -63,3 +63,14 @@ func GatewayReady(p *corev1.Pod, slotID string) bool {
 	}
 	return false
 }
+
+// WireGuardKey is the WireGuard public key the pod's agent publishes, or ""
+// when it has published none.
+func WireGuardKey(p *corev1.Pod) string {
+	for _, c := range p.Status.Conditions {
+		if c.Type == ConditionWireGuardKey && c.Status == corev1.ConditionTrue {
+			return c.Message
+		}
+	}
+	return ""
+}

@@ -19,6 +19,7 @@ package agent
 import (
 	"encoding/json"
 	"net/netip"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -282,7 +283,7 @@ func TestGatewayRole(t *testing.T) {
 		t.Fatal(problems)
 	}
 	want := GatewayRole{Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9")}
-	if d.Gateway == nil || *d.Gateway != want {
+	if d.Gateway == nil || !reflect.DeepEqual(*d.Gateway, want) {
 		t.Fatalf("role %+v", d.Gateway)
 	}
 
@@ -295,5 +296,72 @@ func TestGatewayRole(t *testing.T) {
 	delete(self.Labels, v1.LabelGateway)
 	if d, _ = Compute(s, mustMarks(t)); d.Gateway != nil {
 		t.Fatal("without the gateway label the node is not a gateway")
+	}
+}
+
+// withKey publishes a WireGuard key on an agent pod.
+func withKey(p corev1.Pod, key string) corev1.Pod {
+	p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{Type: v1.ConditionWireGuardKey, Status: corev1.ConditionTrue, Message: key})
+	return p
+}
+
+const (
+	keyA1  = "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+	keyA2  = "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+	keySrc = "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+)
+
+func TestWireGuardGateways(t *testing.T) {
+	s := cluster()
+	for i := range s.Gateways[:2] {
+		s.Gateways[i].Annotations[v1.AnnotationGateway] = `{"pool":"web","slotID":"eni-` + s.Gateways[i].Spec.NodeName + `","tunnel":"WireGuard"}`
+	}
+	// a1 has published its key; a2 has not yet.
+	s.Agents = []corev1.Pod{withKey(s.Gateways[0], keyA1), s.Gateways[1], s.Gateways[2], withKey(pod("", "agent-src", "", nil), keySrc)}
+	s.Agents[3].Spec.NodeName = "src"
+	d, problems := Compute(s, mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	if got := ringGateways(d, "web"); !slices.Equal(got, []netip.Addr{ip("10.0.1.10")}) {
+		t.Fatalf("ring uses %v; a WireGuard gateway without a key cannot take flows", got)
+	}
+	keys := map[netip.Addr]string{}
+	for m, k := range d.WireGuard {
+		keys[d.Gateways[m]] = k
+	}
+	want := map[netip.Addr]string{ip("10.0.1.10"): keyA1, ip("10.0.1.11"): ""}
+	if len(keys) != len(want) || keys[ip("10.0.1.10")] != keyA1 || keys[ip("10.0.1.11")] != "" {
+		t.Fatalf("WireGuard gateways %v, want %v; the GENEVE gateway b1 must not appear", keys, want)
+	}
+	if _, ok := keys[ip("10.0.1.11")]; !ok {
+		t.Fatal("a WireGuard gateway without a key must still be marked as WireGuard, or it would be reached unencrypted")
+	}
+}
+
+func TestWireGuardGatewayPeers(t *testing.T) {
+	s := cluster()
+	self := gatewayPod("a1", true)
+	self.Annotations[v1.AnnotationGateway] = `{"pool":"web","slotID":"eni-a1","mac":"02:00:00:00:00:01","privateIP":"10.0.9.10",` +
+		`"subnetCIDR":"10.0.9.0/24","publicIP":"198.51.100.7","tunnel":"WireGuard"}`
+	s.Node, s.Self = &s.Nodes[0], &self
+	src := withKey(pod("", "agent-src", "", nil), keySrc)
+	src.Spec.NodeName = "src"
+	gone := withKey(pod("", "agent-a2", "", nil), keyA2)
+	gone.Spec.NodeName = "a2"
+	gone.DeletionTimestamp = &metav1.Time{}
+	bad := withKey(pod("", "agent-b1", "", nil), "not-a-key")
+	bad.Spec.NodeName = "b1"
+	s.Agents = []corev1.Pod{withKey(self, keyA1), src, gone, bad}
+	d, problems := Compute(s, mustMarks(t))
+	if d.Gateway == nil || !d.Gateway.WireGuard {
+		t.Fatalf("gateway role %+v; want WireGuard", d.Gateway)
+	}
+	want := map[netip.Addr]string{ip("10.0.1.50"): keySrc}
+	if len(d.Gateway.Peers) != 1 || d.Gateway.Peers[ip("10.0.1.50")] != keySrc {
+		t.Fatalf("peers %v, want %v: not itself, not a terminating agent, not an invalid key", d.Gateway.Peers, want)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "agent-b1 publishes an invalid WireGuard key") {
+		t.Fatalf("problems %q", problems)
 	}
 }

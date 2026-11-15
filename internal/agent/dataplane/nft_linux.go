@@ -242,6 +242,15 @@ func ifIs(in bool, name string, eq bool) []expr.Any {
 	return []expr.Any{&expr.Meta{Key: key, Register: reg1}, &expr.Cmp{Op: op, Register: reg1, Data: ifname(name)}}
 }
 
+// ifPrefix matches an interface whose name starts with prefix.
+func ifPrefix(in bool, prefix string) []expr.Any {
+	key := expr.MetaKeyOIFNAME
+	if in {
+		key = expr.MetaKeyIIFNAME
+	}
+	return []expr.Any{&expr.Meta{Key: key, Register: reg1}, &expr.Cmp{Op: expr.CmpOpEq, Register: reg1, Data: []byte(prefix)}}
+}
+
 func addr(src bool) expr.Any {
 	off := uint32(16)
 	if src {
@@ -337,8 +346,9 @@ const (
 )
 
 // hostRuleset is the host namespace table: steering, the tunnel's source
-// translation and MSS clamp, and the tunnel's sender check.
-func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, gateway bool) error {
+// translation and MSS clamp, and the tunnel's sender check. gatewayTunnel is
+// the device a serving gateway takes traffic from, nj0 or njwg, or empty.
+func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, gatewayTunnel string) error {
 	r := replaceTable(c, mask)
 	nodes, err := r.addrSet("nodes", d.Nodes)
 	if err != nil {
@@ -423,30 +433,44 @@ func hostRuleset(c *nftables.Conn, d *agent.Desired, mask uint32, cfg Config, ga
 	}
 
 	pre := r.base("prerouting", nftables.ChainTypeFilter, nftables.ChainHookPrerouting, prioMangle, nil)
-	// New flows out of the tunnel come only from cluster nodes.
-	r.rule(pre, ifIs(true, TunnelLink, true), ctOriginal(), addrIn(true, nodes, false), verdict(expr.VerdictDrop))
+	// New flows out of a tunnel come only from cluster nodes, and never out
+	// of a device to a gateway: a gateway only answers.
+	for _, link := range []string{TunnelLink, WireGuardLink} {
+		r.rule(pre, ifIs(true, link, true), ctOriginal(), addrIn(true, nodes, false), verdict(expr.VerdictDrop))
+	}
+	r.rule(pre, ifPrefix(true, WireGuardPrefix), ctOriginal(), verdict(expr.VerdictDrop))
 	r.rule(pre, jump("steer"))
 
 	// Tunnel packets are accepted only from cluster nodes.
 	input := r.base("input", nftables.ChainTypeFilter, nftables.ChainHookInput, prioFilter-10, nil)
-	r.rule(input, l4(unix.IPPROTO_UDP), dport(cfg.TunnelPort), addrIn(true, nodes, false), verdict(expr.VerdictDrop))
-
-	// A node only forwards new flows out of the tunnel into its gateway
-	// namespace; replies to its own steered flows pass.
-	fwd := r.base("forward", nftables.ChainTypeFilter, nftables.ChainHookForward, prioFilter-10, nil)
-	if gateway {
-		r.rule(fwd, ifIs(true, TunnelLink, true), ctOriginal(), ifIs(false, VethHost, false), verdict(expr.VerdictDrop))
-	} else {
-		r.rule(fwd, ifIs(true, TunnelLink, true), ctOriginal(), verdict(expr.VerdictDrop))
+	for _, port := range []uint16{cfg.TunnelPort, cfg.WireGuardPort} {
+		r.rule(input, l4(unix.IPPROTO_UDP), dport(port), addrIn(true, nodes, false), verdict(expr.VerdictDrop))
 	}
 
-	// Steered flows leave with the node's address, so replies return here.
+	// A node only forwards new flows out of a tunnel into its gateway
+	// namespace, and only out of the tunnel its pool uses: a gateway of an
+	// encrypted pool takes nothing over GENEVE. Replies to its own steered
+	// flows pass.
+	fwd := r.base("forward", nftables.ChainTypeFilter, nftables.ChainHookForward, prioFilter-10, nil)
+	for _, link := range []string{TunnelLink, WireGuardLink} {
+		if link == gatewayTunnel {
+			r.rule(fwd, ifIs(true, link, true), ctOriginal(), ifIs(false, VethHost, false), verdict(expr.VerdictDrop))
+		} else {
+			r.rule(fwd, ifIs(true, link, true), ctOriginal(), verdict(expr.VerdictDrop))
+		}
+	}
+	r.rule(fwd, ifPrefix(true, WireGuardPrefix), ctOriginal(), verdict(expr.VerdictDrop))
+
+	// Steered flows leave with the node's address, so replies return here,
+	// and an encrypted gateway accepts them from this node's key.
 	post := r.base("postrouting", nftables.ChainTypeNAT, nftables.ChainHookPostrouting, prioSrcNAT-10, nil)
 	for _, link := range []string{TunnelLink, VethHost} {
 		r.rule(post, markBits(false, mask, expr.CmpOpNeq, 0), ifIs(false, link, true), snat(d.NodeIP))
 	}
+	r.rule(post, markBits(false, mask, expr.CmpOpNeq, 0), ifPrefix(false, WireGuardPrefix), snat(d.NodeIP))
 	mss := r.base("mss", nftables.ChainTypeFilter, nftables.ChainHookPostrouting, prioMangle, nil)
 	r.rule(mss, ifIs(false, TunnelLink, true), tcpSyn(), clampToRoute())
+	r.rule(mss, ifPrefix(false, WireGuardPrefix), tcpSyn(), clampToRoute())
 	return nil
 }
 

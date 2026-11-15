@@ -33,6 +33,9 @@ import (
 	"github.com/go-logr/logr/testr"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/Tessarac-LLC/natterjack/internal/agent"
 )
@@ -504,7 +507,8 @@ func TestStaleFlowsAreFlushed(t *testing.T) {
 // TestTunnel runs in three containers on one network, started by
 // hack/test-privileged.sh: a gateway node with the slot, a source node that
 // steers through it, and a host outside the cluster that tries to use the
-// gateway by sending its own GENEVE packets.
+// gateway by sending its own GENEVE packets and, for an encrypted pool, by
+// bringing its own WireGuard key.
 func TestTunnel(t *testing.T) {
 	privileged(t)
 	role := os.Getenv("NATTERJACK_TUNNEL_ROLE")
@@ -514,6 +518,7 @@ func TestTunnel(t *testing.T) {
 	dir := os.Getenv("NATTERJACK_TUNNEL_DIR")
 	gateway := netip.MustParseAddr(os.Getenv("NATTERJACK_TUNNEL_GATEWAY"))
 	source := netip.MustParseAddr(os.Getenv("NATTERJACK_TUNNEL_SOURCE"))
+	encrypted := os.Getenv("NATTERJACK_TUNNEL_TYPE") == "WireGuard"
 	must(t, writeSysctl("net/ipv4/ip_forward", "1"))
 	must(t, writeSysctl("net/ipv4/conf/all/rp_filter", "2"))
 	cfg := DefaultConfig()
@@ -533,6 +538,19 @@ func TestTunnel(t *testing.T) {
 		}
 		t.Fatalf("timed out waiting for %s", name)
 	}
+	// Nodes learn each other's WireGuard keys from their pods; here, from
+	// files.
+	publish := func(role string, dp *Dataplane) {
+		if encrypted {
+			must(t, os.WriteFile(dir+"/"+role+".key", []byte(dp.WireGuardKey()), 0o600))
+		}
+	}
+	keyOf := func(role string) string {
+		await(role + ".key")
+		b, err := os.ReadFile(dir + "/" + role + ".key")
+		must(t, err)
+		return string(b)
+	}
 	var ring [agent.Buckets]uint32
 	for i := range ring {
 		ring[i] = firstMark
@@ -547,10 +565,22 @@ func TestTunnel(t *testing.T) {
 		want := desired(node)
 		want.Nodes = []netip.Addr{gateway, source}
 		want.Steers, want.Rings = nil, nil
+		publish("gateway", dp)
+		if encrypted {
+			want.Gateway.WireGuard = true
+			want.Gateway.Peers = map[netip.Addr]string{source: keyOf("source")}
+		}
 		st, err := dp.Apply(want)
 		must(t, err)
 		if !st.Serving {
 			t.Fatalf("not serving: %s", st.Reason)
+		}
+		if encrypted {
+			got, err := wireGuardPeerAddrs(WireGuardLink)
+			must(t, err)
+			if len(got) != 1 || got[0] != netip.PrefixFrom(source, 32) {
+				t.Fatalf("%s peers may send from %v; want only the source node's address", WireGuardLink, got)
+			}
 		}
 		pc, err := dp.ListenProbe(t.Context())
 		must(t, err)
@@ -573,7 +603,6 @@ func TestTunnel(t *testing.T) {
 		}
 
 	case "source":
-		await("gateway-ready")
 		p := pod(t)
 		dp, err := New(cfg, testr.New(t))
 		must(t, err)
@@ -583,6 +612,11 @@ func TestTunnel(t *testing.T) {
 		want.Gateways = map[uint32]netip.Addr{firstMark: gateway}
 		want.Rings = map[string][agent.Buckets]uint32{poolName: ring}
 		want.Gateway = nil
+		publish("source", dp)
+		await("gateway-ready")
+		if encrypted {
+			want.WireGuard = map[uint32]string{firstMark: keyOf("gateway")}
+		}
 		_, err = dp.Apply(want)
 		must(t, err)
 		defer signal("source-done")
@@ -599,6 +633,22 @@ func TestTunnel(t *testing.T) {
 		}
 		if !probeOnce(t, cfg, firstMark) {
 			t.Errorf("the gateway did not answer a probe through the tunnel\n%s", nftDump())
+		}
+		if encrypted {
+			// The traffic went through WireGuard...
+			if hs, err := wireGuardHandshake(dp.wireGuardName(firstMark)); err != nil || hs.IsZero() {
+				t.Errorf("no WireGuard handshake with the gateway (%v)", err)
+			}
+			// ...and the gateway refuses the same node over plain GENEVE.
+			tun, err := netlink.LinkByName(TunnelLink)
+			must(t, err)
+			must(t, netlink.RouteReplace(&netlink.Route{
+				Table: dp.table(firstMark), Dst: defaultDst(), LinkIndex: tun.Attrs().Index, Encap: &tunnelEncap{ID: VNI, Dst: gateway},
+			}))
+			flushFlows(t)
+			if got := echoWith(t, nil, "downgrade"); !strings.HasPrefix(got, "no reply") {
+				t.Errorf("a gateway of an encrypted pool took traffic over GENEVE: %q", got)
+			}
 		}
 
 	case "outsider":
@@ -624,7 +674,89 @@ func TestTunnel(t *testing.T) {
 		if probeOnce(t, cfg, 0) {
 			t.Fatal("the gateway answered a probe from outside the cluster")
 		}
+		if encrypted {
+			outsiderWireGuard(t, cfg, gateway, keyOf("gateway"))
+		}
 	default:
 		t.Fatalf("unknown role %q", role)
+	}
+}
+
+// wireGuardPeerAddrs are the addresses the peers of a WireGuard device may
+// send from.
+func wireGuardPeerAddrs(name string) ([]netip.Prefix, error) {
+	c, err := wgctrl.New()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = c.Close() }()
+	dev, err := c.Device(name)
+	if err != nil {
+		return nil, err
+	}
+	var out []netip.Prefix
+	for _, p := range dev.Peers {
+		for _, a := range p.AllowedIPs {
+			ip, _ := netip.AddrFromSlice(a.IP.To4())
+			ones, _ := a.Mask.Size()
+			out = append(out, netip.PrefixFrom(ip, ones))
+		}
+	}
+	return out, nil
+}
+
+// wireGuardHandshake is when a device's only peer last completed a
+// handshake.
+func wireGuardHandshake(name string) (time.Time, error) {
+	c, err := wgctrl.New()
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = c.Close() }()
+	dev, err := c.Device(name)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(dev.Peers) != 1 {
+		return time.Time{}, fmt.Errorf("%s has %d peers", name, len(dev.Peers))
+	}
+	return dev.Peers[0].LastHandshakeTime, nil
+}
+
+// flushFlows forgets the node's flows, so the next packet is routed afresh.
+func flushFlows(t *testing.T) {
+	t.Helper()
+	if _, err := netlink.ConntrackDeleteFilters(netlink.ConntrackTable, unix.AF_INET, anyMark{^uint32(0)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// outsiderWireGuard brings its own key to an encrypted gateway: it knows the
+// gateway's public key, as anyone who can read pods does, but is not a peer.
+func outsiderWireGuard(t *testing.T, cfg Config, gateway netip.Addr, gatewayKey string) {
+	t.Helper()
+	must(t, netlink.LinkAdd(&netlink.Wireguard{LinkAttrs: netlink.LinkAttrs{Name: "evilwg"}}))
+	l, err := netlink.LinkByName("evilwg")
+	must(t, err)
+	t.Cleanup(func() { _ = netlink.LinkDel(l) })
+	key, err := wgtypes.GeneratePrivateKey()
+	must(t, err)
+	pub, err := wgtypes.ParseKey(gatewayKey)
+	must(t, err)
+	c, err := wgctrl.New()
+	must(t, err)
+	defer func() { _ = c.Close() }()
+	must(t, c.ConfigureDevice("evilwg", wgtypes.Config{PrivateKey: &key, Peers: []wgtypes.PeerConfig{{
+		PublicKey: pub, Endpoint: &net.UDPAddr{IP: net.IP(gateway.AsSlice()), Port: int(cfg.WireGuardPort)},
+		AllowedIPs: []net.IPNet{*defaultDst()},
+	}}}))
+	must(t, netlink.AddrAdd(l, ipnet(nodeAddr(t).String()+"/32")))
+	must(t, netlink.LinkSetUp(l))
+	must(t, netlink.RouteReplace(&netlink.Route{Dst: hostPrefix(netip.MustParseAddr(internet)), LinkIndex: l.Attrs().Index}))
+	if got := echoWith(t, nil, "outsider"); !strings.HasPrefix(got, "no reply") {
+		t.Fatalf("a host outside the cluster used the gateway over WireGuard: %q", got)
+	}
+	if hs, err := wireGuardHandshake("evilwg"); err != nil || !hs.IsZero() {
+		t.Fatalf("the gateway completed a WireGuard handshake with a key it does not know (%v, %v)", hs, err)
 	}
 }

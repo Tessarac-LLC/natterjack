@@ -100,6 +100,8 @@ func (f *fakeDataplane) Apply(want *agent.Desired) (dataplane.Status, error) {
 	return f.status, f.fail
 }
 
+func (*fakeDataplane) WireGuardKey() string { return "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=" }
+
 func (f *fakeDataplane) ListenProbe(ctx context.Context) (net.PacketConn, error) {
 	c, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp4", "127.0.0.1:0")
 	if err == nil {
@@ -216,7 +218,7 @@ func TestGatewayLifecycle(t *testing.T) {
 	tests := make(selfTests)
 	dp := &fakeDataplane{status: dataplane.Status{Serving: true}}
 	a := &Agent{
-		Client: k8s, Gateways: k8s, AgentSelector: labels.SelectorFromSet(agentLabels),
+		Client: k8s, Agents: k8s, AgentSelector: labels.SelectorFromSet(agentLabels),
 		Dataplane: dp, Marks: marks, Prober: prober,
 		Node: "gw-1", Namespace: ns, Pod: self.Name,
 		Excluded: agent.DefaultExcluded, SelfTestURL: "https://checkip.example", SelfTestInterval: 20 * time.Millisecond,
@@ -239,6 +241,13 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 
 	reconcileOnce()
+	p := &corev1.Pod{}
+	if err := k8s.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: self.Name}, p); err != nil {
+		t.Fatal(err)
+	}
+	if got := v1.WireGuardKey(p); got != dp.WireGuardKey() {
+		t.Fatalf("published WireGuard key %q, want the node's %q", got, dp.WireGuardKey())
+	}
 	d := dp.last()
 	if d.Gateway == nil || d.Gateway.SlotID != "eni-1" || d.Gateway.Public != netip.MustParseAddr("203.0.113.9") {
 		t.Fatalf("gateway role %+v", d.Gateway)
@@ -342,7 +351,7 @@ func TestNonGatewayReportsOnlyItsDataPath(t *testing.T) {
 	}
 	dp := &fakeDataplane{}
 	a := &Agent{
-		Client: k8s, Gateways: k8s, AgentSelector: labels.SelectorFromSet(agentLabels),
+		Client: k8s, Agents: k8s, AgentSelector: labels.SelectorFromSet(agentLabels),
 		Dataplane: dp, Marks: marks, Prober: agent.NewProber(func(context.Context, uint32, netip.AddrPort) (net.Conn, error) {
 			return nil, errors.New("no tunnel in this test")
 		}, netip.AddrPort{}),

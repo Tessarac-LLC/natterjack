@@ -67,5 +67,8 @@ func (*Dataplane) DialGateway(context.Context, string, string) (net.Conn, error)
 	return nil, errLinuxOnly
 }
 
+// WireGuardKey is empty off Linux.
+func (*Dataplane) WireGuardKey() string { return "" }
+
 // Config returns the configuration.
 func (*Dataplane) Config() Config { return Config{} }

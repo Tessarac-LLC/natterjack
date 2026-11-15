@@ -40,6 +40,12 @@ const (
 	EgressLink = "egress0"
 	// VNI is the GENEVE virtual network identifier on every tunnel packet.
 	VNI = 0x4e4a
+	// WireGuardLink is the WireGuard device of a gateway whose pool
+	// encrypts its tunnel; its peers are the cluster's nodes.
+	WireGuardLink = "njwg"
+	// WireGuardPrefix starts the name of each WireGuard device a source node
+	// has, one per encrypted gateway, followed by the gateway's mark index.
+	WireGuardPrefix = "njw-"
 )
 
 // Config sets what the agent may use on the node.
@@ -54,6 +60,8 @@ type Config struct {
 	RulePriority int
 	// TunnelPort is the GENEVE UDP port.
 	TunnelPort uint16
+	// WireGuardPort is the UDP port a gateway's WireGuard device listens on.
+	WireGuardPort uint16
 	// Link is the /30 between the host and gateway namespaces.
 	Link netip.Prefix
 	// ProbePort is where the gateway answers liveness probes.
@@ -71,7 +79,7 @@ type Config struct {
 // defaults.
 func DefaultConfig() Config {
 	return Config{
-		MarkMask: 0x00ff0000, TableBase: 7700, RulePriority: 7700, TunnelPort: 6081,
+		MarkMask: 0x00ff0000, TableBase: 7700, RulePriority: 7700, TunnelPort: 6081, WireGuardPort: 51871,
 		Link: netip.MustParsePrefix("169.254.73.0/30"), ProbePort: 6086,
 		StateDir: "/run/natterjack", MSS: 1460,
 	}
@@ -97,8 +105,11 @@ func (c Config) Validate() error {
 	if !c.TunnelAddr().IsLinkLocalUnicast() {
 		return fmt.Errorf("gateway link %s leaves no link-local address after it for the tunnel device", c.Link)
 	}
-	if c.TunnelPort == 0 || c.ProbePort == 0 || c.StateDir == "" || c.MSS < 536 {
-		return fmt.Errorf("tunnel port, probe port, state directory and an MSS of at least 536 are required")
+	if c.TunnelPort == 0 || c.WireGuardPort == 0 || c.ProbePort == 0 || c.StateDir == "" || c.MSS < 536 {
+		return fmt.Errorf("tunnel port, WireGuard port, probe port, state directory and an MSS of at least 536 are required")
+	}
+	if c.TunnelPort == c.WireGuardPort {
+		return fmt.Errorf("the GENEVE and WireGuard ports must differ")
 	}
 	return nil
 }
