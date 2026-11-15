@@ -15,3 +15,8 @@ builds:
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: [-s, -w, -buildid=, "-X github.com/Tessarac-LLC/natterjack/internal/version.Version={{.Env.VERSION}}"]
+  - id: natterjack
+    main: ./cmd/natterjack
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: [-s, -w, -buildid=, "-X github.com/Tessarac-LLC/natterjack/internal/version.Version={{.Env.VERSION}}"]

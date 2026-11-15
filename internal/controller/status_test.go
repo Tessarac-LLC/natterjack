@@ -44,6 +44,7 @@ func TestStatusHealthy(t *testing.T) {
 	for typ, want := range map[string]metav1.ConditionStatus{
 		v1.ConditionReady: metav1.ConditionTrue, v1.ConditionDegraded: metav1.ConditionFalse, v1.ConditionCrossZoneEgress: metav1.ConditionFalse,
 		v1.ConditionSlotsQuarantined: metav1.ConditionFalse, v1.ConditionSlotsUnschedulable: metav1.ConditionFalse, v1.ConditionForeignSlots: metav1.ConditionFalse,
+		v1.ConditionCloudAccess: metav1.ConditionTrue,
 	} {
 		if c := cond(t, st, typ); c.Status != want || c.ObservedGeneration != 3 {
 			t.Errorf("%s: %+v", typ, c)

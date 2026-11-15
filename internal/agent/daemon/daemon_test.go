@@ -162,12 +162,17 @@ func agentPod(t *testing.T, nodeName string, gw *v1.Gateway) *corev1.Pod {
 
 func condition(t *testing.T, name string) *corev1.PodCondition {
 	t.Helper()
+	return podCondition(t, name, v1.ConditionGatewayReady)
+}
+
+func podCondition(t *testing.T, name string, typ corev1.PodConditionType) *corev1.PodCondition {
+	t.Helper()
 	p := &corev1.Pod{}
 	if err := k8s.Get(t.Context(), client.ObjectKey{Namespace: ns, Name: name}, p); err != nil {
 		t.Fatal(err)
 	}
 	for i := range p.Status.Conditions {
-		if p.Status.Conditions[i].Type == v1.ConditionGatewayReady {
+		if p.Status.Conditions[i].Type == typ {
 			return &p.Status.Conditions[i]
 		}
 	}
@@ -328,7 +333,7 @@ func TestGatewayLifecycle(t *testing.T) {
 	want(corev1.ConditionFalse, "ApplyFailed", "")
 }
 
-func TestNonGatewayLeavesItsPodAlone(t *testing.T) {
+func TestNonGatewayReportsOnlyItsDataPath(t *testing.T) {
 	node(t, "plain-1", "10.0.1.60")
 	self := agentPod(t, "plain-1", nil)
 	marks, err := agent.NewMarks(0x00ff0000)
@@ -350,7 +355,33 @@ func TestNonGatewayLeavesItsPodAlone(t *testing.T) {
 	if c := condition(t, self.Name); c != nil {
 		t.Fatalf("an agent that never served wrote %+v", c)
 	}
+	if c := podCondition(t, self.Name, v1.ConditionDataplaneReady); c == nil || c.Status != corev1.ConditionTrue || c.Reason != "Applied" {
+		t.Fatalf("data path condition %+v, want true after an apply", c)
+	}
 	if err := a.Ready(nil); err != nil {
 		t.Fatal(err)
+	}
+
+	// A failed apply names the error on the pod, where doctor and kubectl
+	// find it, and still writes no gateway condition.
+	dp.fail = errors.New("net.ipv4.conf.all.rp_filter is 1 (strict)")
+	if _, err := a.Reconcile(t.Context(), reconcile.Request{}); err == nil {
+		t.Fatal("apply failure not returned for retry")
+	}
+	c := podCondition(t, self.Name, v1.ConditionDataplaneReady)
+	if c == nil || c.Status != corev1.ConditionFalse || c.Reason != "ApplyFailed" || c.Message != dp.fail.Error() {
+		t.Fatalf("data path condition %+v, want false naming the error", c)
+	}
+	if c := condition(t, self.Name); c != nil {
+		t.Fatalf("an agent that never served wrote %+v", c)
+	}
+
+	// Recovery flips it back.
+	dp.fail = nil
+	if _, err := a.Reconcile(t.Context(), reconcile.Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if c := podCondition(t, self.Name, v1.ConditionDataplaneReady); c == nil || c.Status != corev1.ConditionTrue {
+		t.Fatalf("data path condition %+v, want true after recovery", c)
 	}
 }

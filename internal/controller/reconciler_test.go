@@ -321,6 +321,14 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 
 func TestCloudErrorNamesTheIdentity(t *testing.T) {
 	h := newHarness(t, "errors")
+	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "errors"}})
+	pool := func() *v1.EgressPool {
+		p := &v1.EgressPool{}
+		if err := k8s.Get(h.ctx, client.ObjectKey{Name: "errors"}, p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 	h.cloud.failNext = errors.New("UnauthorizedOperation")
 	_, err := h.r.Reconcile(h.ctx, request)
 	if err == nil || !strings.Contains(err.Error(), "system:serviceaccount:natterjack-system:natterjack-controller") {
@@ -329,9 +337,17 @@ func TestCloudErrorNamesTheIdentity(t *testing.T) {
 	if h.r.Health.Check(nil) == nil {
 		t.Fatal("readiness must fail while the cloud API fails")
 	}
+	// The pool carries the same message, so kubectl and doctor show it.
+	c := meta.FindStatusCondition(pool().Status.Conditions, v1.ConditionCloudAccess)
+	if c == nil || c.Status != metav1.ConditionFalse || c.Message != err.Error() {
+		t.Fatalf("cloud access condition %+v, want false with %q", c, err)
+	}
 	h.reconcile()
 	if h.r.Health.Check(nil) != nil {
 		t.Fatal("readiness must recover")
+	}
+	if c := meta.FindStatusCondition(pool().Status.Conditions, v1.ConditionCloudAccess); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("cloud access condition %+v, want true after recovery", c)
 	}
 }
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds and pushes one release: both images for amd64 and arm64 on a base
-# pinned by digest, each with an SPDX SBOM attached, then the chart with its
-# image references pinned to those digests. Writes what it pushed to
+# Builds and pushes one release: the controller, agent and CLI images for
+# amd64 and arm64 on a base pinned by digest, each with an SPDX SBOM
+# attached, then the chart with its image references pinned to those
+# digests, and the CLI archives for every OS. Writes what it pushed to
 # $OUT/release.json for the signing and attestation steps.
 #
 # Usage: VERSION=v1.2.3 REGISTRY=ghcr.io/tessarac-llc OUT=dist hack/release.sh
@@ -28,12 +29,16 @@ base_digest="$(crane digest "$base_repo:latest")"
 export KO_DEFAULTBASEIMAGE="$base_repo@$base_digest" VERSION GOWORK=off
 echo "base image $KO_DEFAULTBASEIMAGE"
 
+# component=repository:main package. The CLI image runs the chart's doctor test.
 declare -A ref
-for c in controller agent; do
-	out="$(cd "$root" && KO_DOCKER_REPO="$REGISTRY/natterjack-$c" ko build --bare --sbom=spdx --tags "$VERSION" "./cmd/$c")"
+for spec in controller=natterjack-controller:./cmd/controller agent=natterjack-agent:./cmd/agent \
+	cli=natterjack:./cmd/natterjack; do
+	c="${spec%%=*}" repo="${spec#*=}"
+	pkg="${repo#*:}" repo="$REGISTRY/${repo%%:*}"
+	out="$(cd "$root" && KO_DOCKER_REPO="$repo" ko build --bare --sbom=spdx --tags "$VERSION" "$pkg")"
 	# ko prints repo:tag@digest; keep the digest only.
-	ref[$c]="$REGISTRY/natterjack-$c@${out##*@}"
-	[[ "${ref[$c]}" == "$REGISTRY/natterjack-$c@sha256:"* ]] || {
+	ref[$c]="$repo@${out##*@}"
+	[[ "${ref[$c]}" == "$repo@sha256:"* ]] || {
 		echo "ko printed an unexpected reference for $c: ${ref[$c]}" >&2
 		exit 1
 	}
@@ -41,12 +46,12 @@ for c in controller agent; do
 done
 
 cp -R "$root/charts/natterjack" "$work/natterjack"
-python3 -I - "$work/natterjack/values.yaml" "${ref[controller]}" "${ref[agent]}" <<'PY'
+python3 -I - "$work/natterjack/values.yaml" "${ref[controller]}" "${ref[agent]}" "${ref[cli]}" <<'PY'
 import sys
 # Pin each component's image to the repository and digest just pushed.
 path = sys.argv[1]
 want = {}
-for section, ref in (("controller", sys.argv[2]), ("agent", sys.argv[3])):
+for section, ref in (("controller", sys.argv[2]), ("agent", sys.argv[3]), ("doctor", sys.argv[4])):
     repo, digest = ref.split("@")
     want[section] = {"repository": repo, "digest": digest}
 out, section = [], None
@@ -64,8 +69,8 @@ open(path, "w").writelines(out)
 PY
 helm package "$work/natterjack" --version "$chart_version" --app-version "$VERSION" -d "$work" >/dev/null
 helm template check "$work/natterjack-$chart_version.tgz" --set clusterName=x --set controller.aws.region=us-east-1 |
-	grep -c "@sha256:" | grep -qx 2 || {
-	echo "the packaged chart does not pin both images by digest" >&2
+	grep -c "@sha256:" | grep -qx 3 || {
+	echo "the packaged chart does not pin all three images by digest" >&2
 	exit 1
 }
 push="$(helm push "$work/natterjack-$chart_version.tgz" "oci://$REGISTRY/charts" ${PLAIN_HTTP:+--plain-http} 2>&1)"
@@ -77,13 +82,18 @@ chart_digest="$(sed -n 's/^Digest: *//p' <<<"$push")"
 cp "$work/natterjack-$chart_version.tgz" "$OUT/"
 echo "chart $REGISTRY/charts/natterjack:$chart_version@$chart_digest"
 
+VERSION="$VERSION" OUT="$OUT" "$root/hack/cli-dist.sh"
+archives="$(cd "$OUT" && ls "natterjack_${VERSION}_"* | python3 -I -c 'import json,sys; print(json.dumps(sys.stdin.read().split()))')"
+
 cat >"$OUT/release.json" <<JSON
 {
   "version": "$VERSION",
   "base": "$KO_DEFAULTBASEIMAGE",
   "controller": "${ref[controller]}",
   "agent": "${ref[agent]}",
+  "cli": "${ref[cli]}",
   "chart": "$REGISTRY/charts/natterjack@$chart_digest",
-  "chartVersion": "$chart_version"
+  "chartVersion": "$chart_version",
+  "cliArchives": $archives
 }
 JSON

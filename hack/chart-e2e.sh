@@ -65,7 +65,7 @@ step "images"
 # images built locally carry no registry digest.
 export KO_DOCKER_REPO=ko.local GOWORK=off VERSION=v0.0.0-e2e
 platform="linux/$(docker version --format '{{.Server.Arch}}')"
-for c in controller agent; do
+for c in controller agent natterjack; do
 	(cd "$root" && ko build --local --platform="$platform" --base-import-paths --tags e2e "./cmd/$c" >/dev/null)
 	docker image inspect "ko.local/$c:e2e" >/dev/null || fail "ko built no ko.local/$c:e2e"
 	kind load docker-image --name "$cluster" "ko.local/$c:e2e"
@@ -76,6 +76,7 @@ helm install "$release" "$root/charts/natterjack" -n "$ns" --create-namespace \
 	--set clusterName=e2e --set controller.aws.region=us-east-1 \
 	--set controller.image.repository=ko.local/controller --set controller.image.tag=e2e \
 	--set agent.image.repository=ko.local/agent --set agent.image.tag=e2e \
+	--set doctor.image.repository=ko.local/natterjack --set doctor.image.tag=e2e \
 	--set images.pullPolicy=Never
 ds="natterjack-$release-agent"
 kubectl -n "$ns" rollout status "ds/$ds" --timeout=180s || fail "agents did not become ready"
@@ -211,6 +212,47 @@ fixed="$(date +%s)"
 kubectl -n "$ns" wait pod "$fresh" --for=condition=Ready --timeout=60s >/dev/null || fail "the agent did not recover within a minute"
 echo "ready $(($(date +%s) - fixed))s after the fix"
 
+step "helm test runs the doctor, which names the cloud identity at fault"
+# kind has no cloud, so the controller cannot read slots: the doctor must
+# say NO-GO and name the identity a trust policy has to allow.
+kubectl apply -f - >/dev/null <<'POOL'
+apiVersion: natterjack.io/v1alpha1
+kind: EgressPool
+metadata:
+  name: e2e
+spec: {}
+POOL
+kubectl wait egresspool e2e --for=jsonpath='{.status.conditions[?(@.type=="CloudAccess")].status}'=False --timeout=120s >/dev/null ||
+	fail "the pool does not report the failed cloud read"
+if out="$(helm test "$release" -n "$ns" --logs --timeout 180s 2>&1)"; then
+	fail "helm test passed with no cloud reachable: $out"
+fi
+echo "$out"
+expect() { grep -qE "$1" <<<"$out" || fail "the doctor did not report: $1"; }
+expect '^\[ok\] +kubernetes +Kubernetes v1\.'
+expect '^\[ok\] +install +release e2e in namespace natterjack$'
+expect '^\[ok\] +controller leader +natterjack-e2e-controller-'
+expect '^\[ok\] +agents +data path applied on all [0-9]+ nodes$'
+expect '^\[ok\] +admission +controller policy '
+expect '^\[ok\] +admission +agent policy '
+expect '^\[FAIL\] +pool e2e +the controller cannot read the cloud: .*system:serviceaccount:natterjack:natterjack-e2e-controller'
+expect '^NO-GO: '
+if grep -iE 'forbidden|cannot (list|get)' <<<"$out"; then
+	fail "the doctor was denied a read it needs"
+fi
+for kind in serviceaccount role rolebinding; do
+	kubectl -n "$ns" get "$kind" "natterjack-$release-doctor" >/dev/null 2>&1 && fail "the doctor's $kind outlived the test"
+done
+for kind in clusterrole clusterrolebinding; do
+	kubectl get "$kind" "natterjack-$release-doctor" >/dev/null 2>&1 && fail "the doctor's $kind outlived the test"
+done
+# The test pod stays for its logs, as the docs say; removing it is the
+# documented step before uninstalling.
+kubectl -n "$ns" get pod -l app.kubernetes.io/component=doctor -o name | grep -q . || fail "the doctor pod was not kept for its logs"
+kubectl -n "$ns" delete pod -l "app.kubernetes.io/instance=$release,app.kubernetes.io/component=doctor" --wait=true --timeout=60s >/dev/null
+kubectl delete egresspool e2e --wait=true --timeout=60s >/dev/null
+echo "ok"
+
 step "uninstall removes the data path and keeps the CRDs"
 for n in $(nodes); do
 	docker exec "$n" ip link show nj0 >/dev/null 2>&1 || fail "no tunnel link on $n before uninstall"
@@ -221,6 +263,12 @@ for p in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o nam
 	kubectl -n "$ns" logs -f "$p" >"$work/${p#pod/}.log" 2>&1 &
 done
 helm uninstall "$release" -n "$ns" --wait --timeout 120s
+# Helm waits for the objects it deleted, not for the pods the garbage
+# collector removes after them; an agent pod is still running its cleanup.
+for _ in $(seq 60); do
+	[[ -z "$(kubectl -n "$ns" get pods -l "app.kubernetes.io/instance=$release" -o name)" ]] && break
+	sleep 2
+done
 left() {
 	for f in "$work"/*.log; do
 		printf -- '--- %s\n' "$(basename "$f" .log)" >&2
@@ -239,6 +287,9 @@ done
 for crd in egresspools egresspolicies clusteregresspolicies; do
 	kubectl get crd "$crd.natterjack.io" >/dev/null || fail "CRD $crd was removed"
 done
+leftover="$(kubectl get pods,serviceaccounts,roles,rolebindings -n "$ns" -l "app.kubernetes.io/instance=$release" -o name)$(
+	kubectl get clusterroles,clusterrolebindings,validatingadmissionpolicies,validatingadmissionpolicybindings -l "app.kubernetes.io/instance=$release" -o name)"
+[[ -z "$leftover" ]] || fail "uninstall left: $leftover"
 echo "ok"
 
 printf '\nPASS\n'

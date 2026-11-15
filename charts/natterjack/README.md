@@ -104,6 +104,12 @@ Kubernetes: `>=1.34.0-0`
 | `controller.topologySpreadConstraints` | list | `[]` | Defaults spread replicas over zones and nodes. |
 | `crds.install` | bool | `true` | Install and upgrade the CustomResourceDefinitions with the chart. |
 | `crds.keep` | bool | `true` | Keep the CRDs, and every pool and policy, when the release is uninstalled. |
-| `images.pullPolicy` | string | `"IfNotPresent"` | Pull policy for both images. |
-| `images.pullSecrets` | list | `[]` | Image pull secrets, by name, for both components. |
+| `doctor.enabled` | bool | `true` | Install the `helm test` that runs `natterjack doctor` in the cluster and fails unless the installation is ready to carry traffic. The test adds read-only RBAC only while it runs. |
+| `doctor.image.digest` | string | `""` | Pin by digest; takes precedence over the tag. |
+| `doctor.image.repository` | string | `"ghcr.io/tessarac-llc/natterjack"` | Image of the `natterjack` command-line tool. |
+| `doctor.image.tag` | string | `""` | Defaults to the chart's appVersion. |
+| `doctor.resources` | object | `{"limits":{"memory":"128Mi"},"requests":{"cpu":"10m","memory":"32Mi"}}` | Doctor container resources. |
+| `doctor.timeout` | string | `"60s"` | Time the checks may take. |
+| `images.pullPolicy` | string | `"IfNotPresent"` | Pull policy for every image. |
+| `images.pullSecrets` | list | `[]` | Image pull secrets, by name, for every component. |
 | `namespace.create` | bool | `false` | Create the release namespace with the Pod Security "privileged" label the agent needs. When false, the chart checks that the existing namespace carries the label and fails with a clear message if it does not. |
