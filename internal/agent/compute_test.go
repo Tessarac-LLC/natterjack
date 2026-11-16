@@ -137,6 +137,39 @@ func TestRingFallsBackAcrossZones(t *testing.T) {
 	}
 }
 
+// A terminated instance can lose its slot while it still answers probes for
+// the rest of its shutdown; its kubelet says so first.
+func TestGatewayOnAShuttingDownNodeTakesNoNewFlows(t *testing.T) {
+	s := cluster()
+	ready := func(status corev1.ConditionStatus, msg string) []corev1.NodeCondition {
+		return []corev1.NodeCondition{{Type: corev1.NodeReady, Status: status, Reason: "KubeletNotReady", Message: msg}}
+	}
+	s.Nodes[0].Status.Conditions = ready(corev1.ConditionFalse, "node is shutting down")
+	d, problems := Compute(s, mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.11")}) {
+		t.Fatalf("ring uses %v; a gateway whose node is shutting down must take no new flows", got)
+	}
+	if len(d.Gateways) != 3 || len(d.Failed) != 0 {
+		t.Fatalf("marks %v failed %v; the gateway keeps its mark and its flows are not flushed", d.Gateways, d.Failed)
+	}
+	// Any other reason for NotReady, such as a kubelet that lost the API
+	// server, says nothing about the slot: the probes decide.
+	for _, c := range [][]corev1.NodeCondition{
+		ready(corev1.ConditionUnknown, "Kubelet stopped posting node status."),
+		ready(corev1.ConditionFalse, "container runtime network not ready"),
+		ready(corev1.ConditionTrue, "kubelet is posting ready status"),
+	} {
+		s.Nodes[0].Status.Conditions = c
+		d, _ = Compute(s, mustMarks(t))
+		if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.10"), ip("10.0.1.11")}) {
+			t.Fatalf("Ready %s %q: ring uses %v", c[0].Status, c[0].Message, got)
+		}
+	}
+}
+
 func TestNoLiveGatewayMeansNoRing(t *testing.T) {
 	s := cluster()
 	for i := range s.Gateways {

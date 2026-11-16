@@ -346,12 +346,14 @@ flow_gap() {
 	awk '$2 == "FAIL" { if (!s) s = $1; e = $1 } $2 != "FAIL" { if (s && e - s + 200 > m) m = e - s + 200; s = 0 }
 		END { if (s && e - s + 200 > m) m = e - s + 200; print m + 0 }' "$work/flows-$1"
 }
+# keep_flows POD: keep the record of a pod's requests in $OUT.
+keep_flows() { cp "$work/flows-$1" "$OUT/flows-$1-$(date -u +%H%M%S)"; }
 # flows_in_zone POD ZONE: whether every answered request left from a slot in
 # ZONE. The record is kept in $OUT, and each answer from elsewhere is printed
 # with its time.
 flows_in_zone() {
 	local ms addr bad
-	cp "$work/flows-$1" "$OUT/flows-$1-$(date -u +%H%M%S)"
+	keep_flows "$1"
 	bad="$(awk 'NR == FNR { ok[$1] = 1; next } $2 != "FAIL" && !($2 in ok)' <(slot_ips "$2") "$work/flows-$1")"
 	[[ -z "$bad" ]] && return 0
 	while read -r ms addr; do
@@ -502,7 +504,7 @@ wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
 # The probes notice in about a second; a request in flight then can wait
 # out its own one-second timeout.
-((gap <= 3000)) || fail "new connections failed for ${gap}ms after the gateway died"
+((gap <= 3000)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms after the gateway died"; }
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after the gateway died"
 record "failover: longest run of failed new connections ${gap}ms; $id active on $(slot "$id" node) after ${moved_after}s"
 eventually 900 "the node group replaces the terminated node" nodes_ready
@@ -539,7 +541,7 @@ sleep 10
 kill "$watch" 2>/dev/null || true
 wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
-((gap <= 3000)) || fail "new connections failed for ${gap}ms after $gw rebooted"
+((gap <= 3000)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms after $gw rebooted"; }
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after $gw rebooted"
 unmanaged || fail "the VPC CNI added addresses to a slot interface after the reboot"
 record "reboot: $gw back after ${up_after}s; $id on $(slot "$id" node); longest run of failed new connections ${gap}ms; no slot interface gained a secondary address"
