@@ -8,7 +8,7 @@ output "slots" {
   value = {
     for k, eni in aws_network_interface.slot : k => {
       network_interface_id = eni.id
-      availability_zone    = data.aws_subnet.slot[eni.subnet_id].availability_zone
+      availability_zone    = data.aws_subnet.slot[split("/", k)[0]].availability_zone
       public_ip            = aws_eip.slot[k].public_ip
     }
   }

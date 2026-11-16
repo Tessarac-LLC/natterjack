@@ -14,8 +14,8 @@ mock_provider "aws" {
 }
 
 variables {
-  cluster_name    = "prod-east"
-  slot_subnet_ids = ["subnet-0000000000000000a"]
+  cluster_name = "prod-east"
+  slot_subnets = { "us-east-1a" = "subnet-0000000000000000a" }
 }
 
 run "slots_pass_the_controllers_safety_checks" {
@@ -120,23 +120,40 @@ run "bootstrap_route_and_tunnel_rule" {
   command = plan
 
   variables {
-    bootstrap_route_table_ids = { "subnet-0000000000000000a" = "rtb-0000000000000000a" }
-    node_security_group_id    = "sg-0000000000000000a"
+    bootstrap_route_table_ids = { "us-east-1a" = "rtb-0000000000000000a" }
+    node_security_group_ids   = ["sg-0000000000000000a"]
   }
 
   assert {
-    condition     = aws_route.bootstrap["subnet-0000000000000000a"].destination_cidr_block == "0.0.0.0/0" && aws_route.bootstrap["subnet-0000000000000000a"].route_table_id == "rtb-0000000000000000a"
+    condition     = aws_route.bootstrap["us-east-1a"].destination_cidr_block == "0.0.0.0/0" && aws_route.bootstrap["us-east-1a"].route_table_id == "rtb-0000000000000000a"
     error_message = "The bootstrap route sends the private route table's default route to the zone's first slot."
   }
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.tunnel[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel[0].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel[0].referenced_security_group_id == "sg-0000000000000000a"
+    condition     = aws_vpc_security_group_ingress_rule.tunnel["0/0"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel["0/0"].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel["0/0"].referenced_security_group_id == "sg-0000000000000000a"
     error_message = "The tunnel rule allows UDP 6081 between nodes only."
   }
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.wireguard[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.wireguard[0].from_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].to_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].referenced_security_group_id == "sg-0000000000000000a"
+    condition     = aws_vpc_security_group_ingress_rule.wireguard["0/0"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.wireguard["0/0"].from_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard["0/0"].to_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard["0/0"].referenced_security_group_id == "sg-0000000000000000a"
     error_message = "The WireGuard rule allows UDP 51871 between nodes only."
+  }
+}
+
+run "tunnel_rules_between_every_node_group" {
+  command = plan
+
+  variables {
+    node_security_group_ids = ["sg-0000000000000000a", "sg-0000000000000000b"]
+  }
+
+  assert {
+    condition = (
+      length(aws_vpc_security_group_ingress_rule.tunnel) == 4 && length(aws_vpc_security_group_ingress_rule.wireguard) == 4
+      && aws_vpc_security_group_ingress_rule.tunnel["0/1"].referenced_security_group_id == "sg-0000000000000000a"
+      && aws_vpc_security_group_ingress_rule.tunnel["0/1"].security_group_id == "sg-0000000000000000b"
+    )
+    error_message = "Each node group accepts both tunnels from every node group, itself included."
   }
 }
 
@@ -160,4 +177,39 @@ run "ports_must_differ" {
   }
 
   expect_failures = [var.wireguard_port]
+}
+
+run "bootstrap_routes_only_for_slot_zones" {
+  command = plan
+
+  variables {
+    bootstrap_route_table_ids = { "us-east-1b" = "rtb-0000000000000000b" }
+  }
+
+  expect_failures = [var.bootstrap_route_table_ids]
+}
+
+run "slot_subnet_keyed_by_another_zone_is_refused" {
+  command = plan
+
+  variables {
+    slot_subnets = { "us-east-1b" = "subnet-0000000000000000a" }
+  }
+
+  expect_failures = [aws_network_interface.slot]
+}
+
+# Subnets, route tables and security groups created in the same apply have no
+# IDs at plan time.
+run "plans_with_subnets_created_in_the_same_apply" {
+  command = plan
+
+  module {
+    source = "./tests/new-vpc"
+  }
+
+  assert {
+    condition     = length(module.natterjack.slots) == 4
+    error_message = "Two zones with two slots each."
+  }
 }

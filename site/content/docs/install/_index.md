@@ -36,9 +36,9 @@ creates, for one cluster:
 module "natterjack" {
   source = "github.com/Tessarac-LLC/natterjack//deploy/terraform/aws?ref=v1.0.0"
 
-  cluster_name           = "prod-east"
-  slot_subnet_ids        = module.vpc.public_subnets
-  node_security_group_id = module.eks.node_security_group_id
+  cluster_name            = "prod-east"
+  slot_subnets            = zipmap(module.vpc.azs, module.vpc.public_subnets)
+  node_security_group_ids = [module.eks.node_security_group_id]
 }
 ```
 
@@ -147,7 +147,7 @@ subnet's default route at its zone's first slot, in place of the NAT
 gateway:
 
 ```hcl
-  bootstrap_route_table_ids = zipmap(module.vpc.public_subnets, module.vpc.private_route_table_ids)
+  bootstrap_route_table_ids = zipmap(module.vpc.azs, module.vpc.private_route_table_ids)
 ```
 
 The route names the ENI, so it stays valid when the controller moves the slot
