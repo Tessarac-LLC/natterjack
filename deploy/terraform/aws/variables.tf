@@ -40,10 +40,10 @@ variable "bootstrap_route_table_ids" {
   }
 }
 
-variable "node_security_group_id" {
-  description = "Security group shared by the cluster's nodes. The module allows the agent tunnel (UDP) between members of this group. Null to manage the rule yourself."
-  type        = string
-  default     = null
+variable "node_security_group_ids" {
+  description = "Security groups of the cluster's nodes. The module allows the agent tunnels (UDP) from each of these groups to each. Empty to manage the rules yourself."
+  type        = list(string)
+  default     = []
 }
 
 variable "tunnel_port" {

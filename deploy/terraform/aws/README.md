@@ -13,7 +13,7 @@ Creates everything Natterjack needs in an AWS account for one cluster:
   It is trusted by EKS Pod Identity (default) or, with `identity = "irsa"`,
   by the controller's ServiceAccount through the cluster's OIDC provider.
 - **Optionally**, the agent tunnel rule between nodes
-  (`node_security_group_id`) and each zone's bootstrap route
+  (`node_security_group_ids`) and each zone's bootstrap route
   (`bootstrap_route_table_ids`), which sends a private subnet's default route
   to the zone's first slot so nodes reach the internet before their agent
   runs.
@@ -24,9 +24,9 @@ Creates everything Natterjack needs in an AWS account for one cluster:
 module "natterjack" {
   source = "github.com/Tessarac-LLC/natterjack//deploy/terraform/aws?ref=v1.0.0"
 
-  cluster_name           = "prod-east"
-  slot_subnets           = zipmap(module.vpc.azs, module.vpc.public_subnets)
-  node_security_group_id = module.eks.node_security_group_id
+  cluster_name            = "prod-east"
+  slot_subnets            = zipmap(module.vpc.azs, module.vpc.public_subnets)
+  node_security_group_ids = [module.eks.node_security_group_id]
 
   # Optional: replace the NAT gateway's default route in each zone.
   bootstrap_route_table_ids = zipmap(module.vpc.azs, module.vpc.private_route_table_ids)
@@ -105,7 +105,7 @@ No modules.
 | bootstrap\_route\_table\_ids | Private route tables, keyed by zone name as in slot\_subnets, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route. | `map(string)` | `{}` | no |
 | identity | How the controller gets AWS credentials: "pod-identity" (EKS Pod Identity; the eks-pod-identity-agent add-on must be installed) or "irsa" (IAM roles for service accounts). | `string` | `"pod-identity"` | no |
 | namespace | Namespace the chart is installed in. | `string` | `"natterjack"` | no |
-| node\_security\_group\_id | Security group shared by the cluster's nodes. The module allows the agent tunnel (UDP) between members of this group. Null to manage the rule yourself. | `string` | `null` | no |
+| node\_security\_group\_ids | Security groups of the cluster's nodes. The module allows the agent tunnels (UDP) from each of these groups to each. Empty to manage the rules yourself. | `list(string)` | `[]` | no |
 | oidc\_provider\_arn | ARN of the cluster's IAM OIDC provider. Required when identity is "irsa". | `string` | `null` | no |
 | service\_account | The controller's ServiceAccount name. The chart default is `<release>-controller`, so `natterjack-controller` for a release named natterjack. | `string` | `"natterjack-controller"` | no |
 | slots\_per\_subnet | Slots (ENI with an Elastic IP) per subnet. Two give a zone a warm replacement: the controller fails over by moving an attached slot or using a spare. | `number` | `2` | no |

@@ -36,9 +36,9 @@ creates, for one cluster:
 module "natterjack" {
   source = "github.com/Tessarac-LLC/natterjack//deploy/terraform/aws?ref=v1.0.0"
 
-  cluster_name           = "prod-east"
-  slot_subnets           = zipmap(module.vpc.azs, module.vpc.public_subnets)
-  node_security_group_id = module.eks.node_security_group_id
+  cluster_name            = "prod-east"
+  slot_subnets            = zipmap(module.vpc.azs, module.vpc.public_subnets)
+  node_security_group_ids = [module.eks.node_security_group_id]
 }
 ```
 

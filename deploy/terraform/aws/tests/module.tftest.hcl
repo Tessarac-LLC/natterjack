@@ -121,7 +121,7 @@ run "bootstrap_route_and_tunnel_rule" {
 
   variables {
     bootstrap_route_table_ids = { "us-east-1a" = "rtb-0000000000000000a" }
-    node_security_group_id    = "sg-0000000000000000a"
+    node_security_group_ids   = ["sg-0000000000000000a"]
   }
 
   assert {
@@ -130,13 +130,30 @@ run "bootstrap_route_and_tunnel_rule" {
   }
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.tunnel[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel[0].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel[0].referenced_security_group_id == "sg-0000000000000000a"
+    condition     = aws_vpc_security_group_ingress_rule.tunnel["0/0"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.tunnel["0/0"].from_port == 6081 && aws_vpc_security_group_ingress_rule.tunnel["0/0"].referenced_security_group_id == "sg-0000000000000000a"
     error_message = "The tunnel rule allows UDP 6081 between nodes only."
   }
 
   assert {
-    condition     = aws_vpc_security_group_ingress_rule.wireguard[0].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.wireguard[0].from_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].to_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard[0].referenced_security_group_id == "sg-0000000000000000a"
+    condition     = aws_vpc_security_group_ingress_rule.wireguard["0/0"].ip_protocol == "udp" && aws_vpc_security_group_ingress_rule.wireguard["0/0"].from_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard["0/0"].to_port == 51871 && aws_vpc_security_group_ingress_rule.wireguard["0/0"].referenced_security_group_id == "sg-0000000000000000a"
     error_message = "The WireGuard rule allows UDP 51871 between nodes only."
+  }
+}
+
+run "tunnel_rules_between_every_node_group" {
+  command = plan
+
+  variables {
+    node_security_group_ids = ["sg-0000000000000000a", "sg-0000000000000000b"]
+  }
+
+  assert {
+    condition = (
+      length(aws_vpc_security_group_ingress_rule.tunnel) == 4 && length(aws_vpc_security_group_ingress_rule.wireguard) == 4
+      && aws_vpc_security_group_ingress_rule.tunnel["0/1"].referenced_security_group_id == "sg-0000000000000000a"
+      && aws_vpc_security_group_ingress_rule.tunnel["0/1"].security_group_id == "sg-0000000000000000b"
+    )
+    error_message = "Each node group accepts both tunnels from every node group, itself included."
   }
 }
 
@@ -182,7 +199,8 @@ run "slot_subnet_keyed_by_another_zone_is_refused" {
   expect_failures = [aws_network_interface.slot]
 }
 
-# Subnets and route tables created in the same apply have no IDs at plan time.
+# Subnets, route tables and security groups created in the same apply have no
+# IDs at plan time.
 run "plans_with_subnets_created_in_the_same_apply" {
   command = plan
 

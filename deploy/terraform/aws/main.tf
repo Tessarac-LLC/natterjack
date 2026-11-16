@@ -19,6 +19,13 @@ locals {
     "node.k8s.amazonaws.com/no_manage" = "true"
   }
 
+  # Every node group can reach every other. Keyed by position: the IDs of
+  # groups created in the same apply are unknown at plan time.
+  node_security_group_pairs = {
+    for p in setproduct(range(length(var.node_security_group_ids)), range(length(var.node_security_group_ids))) :
+    "${p[0]}/${p[1]}" => { from = var.node_security_group_ids[p[0]], to = var.node_security_group_ids[p[1]] }
+  }
+
   oidc_issuer = var.oidc_provider_arn == null ? "" : replace(var.oidc_provider_arn, "/^.*oidc-provider\\//", "")
 }
 
@@ -96,10 +103,10 @@ resource "aws_route" "bootstrap" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "tunnel" {
-  count = var.node_security_group_id == null ? 0 : 1
+  for_each = local.node_security_group_pairs
 
-  security_group_id            = var.node_security_group_id
-  referenced_security_group_id = var.node_security_group_id
+  security_group_id            = each.value.to
+  referenced_security_group_id = each.value.from
   description                  = "Natterjack agent tunnel between nodes."
   ip_protocol                  = "udp"
   from_port                    = var.tunnel_port
@@ -108,10 +115,10 @@ resource "aws_vpc_security_group_ingress_rule" "tunnel" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "wireguard" {
-  count = var.node_security_group_id == null ? 0 : 1
+  for_each = local.node_security_group_pairs
 
-  security_group_id            = var.node_security_group_id
-  referenced_security_group_id = var.node_security_group_id
+  security_group_id            = each.value.to
+  referenced_security_group_id = each.value.from
   description                  = "Natterjack agent WireGuard tunnel between nodes."
   ip_protocol                  = "udp"
   from_port                    = var.wireguard_port

@@ -19,10 +19,15 @@ resource "aws_route_table" "private" {
   vpc_id = aws_vpc.this.id
 }
 
+resource "aws_security_group" "nodes" {
+  vpc_id = aws_vpc.this.id
+}
+
 module "natterjack" {
   source = "../.."
 
   cluster_name              = "prod-east"
   slot_subnets              = { for z, s in aws_subnet.public : z => s.id }
   bootstrap_route_table_ids = { for z, r in aws_route_table.private : z => r.id }
+  node_security_group_ids   = [aws_security_group.nodes.id]
 }
