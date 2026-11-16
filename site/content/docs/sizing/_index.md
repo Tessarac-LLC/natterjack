@@ -62,6 +62,24 @@ another region:
 REGION=eu-central-1 hack/aws-bandwidth.sh m7i m7g c8g
 ```
 
+## Measured
+
+The EKS end-to-end test measures one gateway of each architecture with
+iperf3: eight parallel TCP streams for 20 seconds, from a pod on another
+node in the zone to a server outside the VPC, through the gateway's slot and
+the internet gateway. Results from 16 November 2026, `us-east-2`:
+
+| Gateway | Architecture | Egress (Gbps) | Ingress (Gbps) |
+| --- | --- | ---: | ---: |
+| `m7i.large` | amd64 | 4.78 | 4.78 |
+| `m7g.large` | arm64 | 4.78 | 4.78 |
+
+Both reach the internet gateway's 5 Gbps limit, less TCP and IP overhead,
+in both directions: the gateway, not its CPU, is what AWS caps. A 20-second
+run measures the burst rate. Over minutes a `large` gateway falls back to
+the baseline in the table above. The test writes these figures to
+`bench.json`, so each run can be checked against them.
+
 ## How many gateways a zone needs
 
 A zone's selected traffic is spread across its gateways by flow, so a zone
