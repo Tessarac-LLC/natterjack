@@ -126,14 +126,15 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 	for i := range enis {
 		e := &enis[i]
 		s := cloud.Slot{
-			ID:          aws.ToString(e.NetworkInterfaceId),
-			Zone:        aws.ToString(e.AvailabilityZone),
-			PrivateIP:   aws.ToString(e.PrivateIpAddress),
-			MAC:         aws.ToString(e.MacAddress),
-			SubnetID:    aws.ToString(e.SubnetId),
-			SubnetCIDR:  cidrs[aws.ToString(e.SubnetId)],
-			RouteTarget: routeTargets[aws.ToString(e.NetworkInterfaceId)],
-			Tags:        make(map[string]string, len(e.TagSet)),
+			ID:            aws.ToString(e.NetworkInterfaceId),
+			Zone:          aws.ToString(e.AvailabilityZone),
+			PrivateIP:     aws.ToString(e.PrivateIpAddress),
+			MAC:           aws.ToString(e.MacAddress),
+			SubnetID:      aws.ToString(e.SubnetId),
+			SubnetCIDR:    cidrs[aws.ToString(e.SubnetId)],
+			RouteTarget:   routeTargets[aws.ToString(e.NetworkInterfaceId)],
+			RoutedSources: ins.routedSources(e),
+			Tags:          make(map[string]string, len(e.TagSet)),
 		}
 		for _, t := range e.TagSet {
 			s.Tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
@@ -145,7 +146,7 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 			s.Instance = aws.ToString(e.Attachment.InstanceId)
 			s.InstanceInCluster = inCluster[s.Instance]
 		}
-		s.Problems = problems(e, ins, igw, cidrs)
+		s.Problems = problems(e, ins.wide, igw, cidrs)
 		slots = append(slots, s)
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i].ID < slots[j].ID })
@@ -193,11 +194,34 @@ func hasTag(tags []types.Tag, key, value string) bool {
 	})
 }
 
-// inboundRules reports, per security group, whether it admits traffic from
-// anywhere but its VPC's own IPv4 blocks. A bootstrap route sends the VPC's
-// traffic through a slot, and the VPC applies the slot's groups to it, so
-// such a rule is needed; anything wider would expose the gateway.
-func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterface) (map[string]bool, error) {
+// groupRules describes the slots' security groups' inbound rules.
+type groupRules struct {
+	// wide reports, per group, whether it admits anything but its VPC's
+	// own IPv4 blocks (a group that cannot be read counts as wide).
+	wide map[string]bool
+	// ruled holds the groups with any inbound rule.
+	ruled map[string]bool
+	// blocks are the IPv4 blocks of the ruled groups' VPCs.
+	blocks map[string][]netip.Prefix
+}
+
+// routedSources are the sources a route table may send through e: its VPC's
+// blocks when one of its groups admits them, and none otherwise, since
+// nothing routed can then reach it.
+func (in groupRules) routedSources(e *types.NetworkInterface) []string {
+	for _, g := range e.Groups {
+		if in.ruled[aws.ToString(g.GroupId)] {
+			return prefixStrings(in.blocks[aws.ToString(e.VpcId)])
+		}
+	}
+	return nil
+}
+
+// inboundRules reads the slots' security groups. A bootstrap route sends the
+// VPC's traffic through a slot, and the VPC applies the slot's groups to it,
+// so a rule admitting the VPC is needed; anything wider would expose the
+// gateway.
+func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterface) (groupRules, error) {
 	var ids []string
 	for i := range enis {
 		for _, g := range enis[i].Groups {
@@ -206,20 +230,22 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 	}
 	ids = unique(ids)
 	out := map[string]bool{}
+	in := groupRules{wide: out, ruled: map[string]bool{}}
 	if len(ids) == 0 {
-		return out, nil
+		return in, nil
 	}
 	var withRules []types.SecurityGroup
 	pager := ec2.NewDescribeSecurityGroupsPaginator(p.ec2, &ec2.DescribeSecurityGroupsInput{GroupIds: ids})
 	for pager.HasMorePages() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("describe security groups: %w", err)
+			return in, fmt.Errorf("describe security groups: %w", err)
 		}
 		for _, g := range page.SecurityGroups {
 			out[aws.ToString(g.GroupId)] = false
 			if len(g.IpPermissions) > 0 {
 				withRules = append(withRules, g)
+				in.ruled[aws.ToString(g.GroupId)] = true
 			}
 		}
 	}
@@ -230,26 +256,26 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 		}
 	}
 	if len(withRules) == 0 {
-		return out, nil
+		return in, nil
 	}
-	blocks, err := p.vpcBlocks(ctx, withRules)
+	var vpcIDs []string
+	for _, g := range withRules {
+		vpcIDs = append(vpcIDs, aws.ToString(g.VpcId))
+	}
+	blocks, err := p.vpcBlocks(ctx, vpcIDs)
 	if err != nil {
-		return nil, err
+		return in, err
 	}
+	in.blocks = blocks
 	for _, g := range withRules {
 		out[aws.ToString(g.GroupId)] = !withinVPC(g.IpPermissions, blocks[aws.ToString(g.VpcId)])
 	}
-	return out, nil
+	return in, nil
 }
 
-// vpcBlocks returns each group's VPC's associated IPv4 blocks.
-func (p *Provider) vpcBlocks(ctx context.Context, groups []types.SecurityGroup) (map[string][]netip.Prefix, error) {
-	var vpcs []string
-	for _, g := range groups {
-		if id := aws.ToString(g.VpcId); id != "" {
-			vpcs = append(vpcs, id)
-		}
-	}
+// vpcBlocks returns each VPC's associated IPv4 blocks, sorted.
+func (p *Provider) vpcBlocks(ctx context.Context, ids []string) (map[string][]netip.Prefix, error) {
+	vpcs := slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return id == "" })
 	out := map[string][]netip.Prefix{}
 	if vpcs = unique(vpcs); len(vpcs) == 0 {
 		return out, nil
@@ -272,6 +298,22 @@ func (p *Provider) vpcBlocks(ctx context.Context, groups []types.SecurityGroup) 
 		}
 	}
 	return out, nil
+}
+
+// prefixStrings formats prefixes, sorted by address then length.
+func prefixStrings(ps []netip.Prefix) []string {
+	ps = slices.Clone(ps)
+	slices.SortFunc(ps, func(a, b netip.Prefix) int {
+		if c := a.Addr().Compare(b.Addr()); c != 0 {
+			return c
+		}
+		return a.Bits() - b.Bits()
+	})
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.String())
+	}
+	return slices.Compact(out)
 }
 
 // withinVPC reports whether every inbound source is an IPv4 CIDR inside one

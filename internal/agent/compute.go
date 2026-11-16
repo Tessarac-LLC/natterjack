@@ -297,12 +297,20 @@ func gatewayRole(p *corev1.Pod) (*GatewayRole, error) {
 	if err1 != nil || err2 != nil || err3 != nil || !priv.Is4() || !subnet.Contains(priv) || subnet.Bits() > 30 {
 		return nil, fmt.Errorf("gateway assignment for %s is incomplete or inconsistent: private %q, subnet %q, public %q", g.SlotID, g.PrivateIP, g.SubnetCIDR, g.PublicIP)
 	}
+	var routed []netip.Prefix
+	for _, s := range g.RoutedSources {
+		r, err := netip.ParsePrefix(s)
+		if err != nil || !r.Addr().Is4() {
+			return nil, fmt.Errorf("gateway assignment for %s has an invalid routed source %q", g.SlotID, s)
+		}
+		routed = append(routed, r.Masked())
+	}
 	// Every supported cloud puts the subnet router at the first host
 	// address.
 	router := subnet.Masked().Addr().Next()
 	return &GatewayRole{
 		Pool: g.Pool, SlotID: g.SlotID, MAC: strings.ToLower(g.MAC), Address: netip.PrefixFrom(priv, subnet.Bits()),
-		Router: router, Public: pub, Draining: p.Annotations[v1.AnnotationDrainStarted] != "",
+		Router: router, Public: pub, Routed: routed, Draining: p.Annotations[v1.AnnotationDrainStarted] != "",
 		WireGuard: g.Tunnel == v1.TunnelWireGuard,
 	}, nil
 }

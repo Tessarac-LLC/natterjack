@@ -509,6 +509,13 @@ func gatewayRuleset(c *nftables.Conn, d *agent.Desired, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	// The only sources a route table may send through the slot. Anything
+	// else arriving on it carries a forged source, and translating it would
+	// send it out from the slot's public address.
+	routed, err := r.prefixSet("routed", d.Gateway.Routed)
+	if err != nil {
+		return err
+	}
 	drop := nftables.ChainPolicyDrop
 
 	// Flows routed to the slot by a VPC route table come from addresses this
@@ -517,7 +524,7 @@ func gatewayRuleset(c *nftables.Conn, d *agent.Desired, cfg Config) error {
 	// go back out the slot, not through the host, whose interface would drop
 	// a source that is not its own.
 	pre := r.base("prerouting", nftables.ChainTypeFilter, nftables.ChainHookPrerouting, prioMangle, nil)
-	r.rule(pre, ifIs(true, EgressLink, true), ctOriginal(), addrIn(true, private, true), setMarkBits(true, routedMark, routedMark))
+	r.rule(pre, ifIs(true, EgressLink, true), ctOriginal(), addrIn(true, routed, true), setMarkBits(true, routedMark, routedMark))
 	r.rule(pre, markBits(true, routedMark, expr.CmpOpNeq), setMarkBits(false, routedMark, routedMark))
 
 	input := r.base("input", nftables.ChainTypeFilter, nftables.ChainHookInput, prioFilter, &drop)
@@ -530,7 +537,7 @@ func gatewayRuleset(c *nftables.Conn, d *agent.Desired, cfg Config) error {
 	// Tunneled flows: their source is always a node, translated there.
 	r.rule(fwd, ifIs(true, VethGateway, true), ifIs(false, EgressLink, true), addrIn(true, nodes, true), verdict(expr.VerdictAccept))
 	// Flows routed to the slot by a VPC route table, before agents steer.
-	r.rule(fwd, ifIs(true, EgressLink, true), ifIs(false, EgressLink, true), addrIn(true, private, true), addrIn(false, private, false), verdict(expr.VerdictAccept))
+	r.rule(fwd, ifIs(true, EgressLink, true), ifIs(false, EgressLink, true), addrIn(true, routed, true), addrIn(false, private, false), verdict(expr.VerdictAccept))
 
 	mss := r.base("mss", nftables.ChainTypeFilter, nftables.ChainHookForward, prioMangle, nil)
 	r.rule(mss, ifIs(false, EgressLink, true), tcpSyn(), clampTo(cfg.MSS))

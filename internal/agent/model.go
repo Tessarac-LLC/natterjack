@@ -87,6 +87,10 @@ type GatewayRole struct {
 	Router netip.Addr
 	// Public is the address traffic leaves from, checked by the self-test.
 	Public netip.Addr
+	// Routed are the only sources a route table may send through the slot.
+	// Traffic arriving on the slot from anywhere else is dropped, so a
+	// packet with a forged source is never translated and sent out.
+	Routed []netip.Prefix
 	// Draining is set when the gateway must stop taking new flows.
 	Draining bool
 	// WireGuard is set when the pool encrypts its tunnel. The gateway then

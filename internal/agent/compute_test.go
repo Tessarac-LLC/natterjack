@@ -284,15 +284,31 @@ func TestGatewayRole(t *testing.T) {
 	self := gatewayPod("src", false)
 	self.Annotations = map[string]string{v1.AnnotationGateway: gatewayAnnotation(t, v1.Gateway{
 		Pool: "web", SlotID: "eni-1", MAC: "02:AA:00:00:00:01", PrivateIP: "10.0.9.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9",
+		RoutedSources: []string{"10.0.0.0/16", "100.64.0.0/16"},
 	})}
 	s.Self = &self
 	d, problems := Compute(s, mustMarks(t))
 	if len(problems) != 0 {
 		t.Fatal(problems)
 	}
-	want := GatewayRole{Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9")}
+	want := GatewayRole{
+		Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9"),
+		Routed: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("100.64.0.0/16")},
+	}
 	if d.Gateway == nil || !reflect.DeepEqual(*d.Gateway, want) {
 		t.Fatalf("role %+v", d.Gateway)
+	}
+
+	// A routed source the agent cannot read would otherwise be dropped from
+	// the set silently; refusing the role keeps the old ruleset in place.
+	for _, bad := range []string{"10.0.0.0", "2001:db8::/32", "10.0.0.0/33"} {
+		self.Annotations[v1.AnnotationGateway] = gatewayAnnotation(t, v1.Gateway{
+			Pool: "web", SlotID: "eni-1", PrivateIP: "10.0.9.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9", RoutedSources: []string{bad},
+		})
+		d, problems = Compute(s, mustMarks(t))
+		if d.Gateway != nil || len(problems) != 1 || !strings.Contains(problems[0], "invalid routed source") {
+			t.Fatalf("routed source %q: role %+v problems %v", bad, d.Gateway, problems)
+		}
 	}
 
 	self.Annotations[v1.AnnotationGateway] = gatewayAnnotation(t, v1.Gateway{Pool: "web", SlotID: "eni-1", PrivateIP: "10.0.8.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9"})

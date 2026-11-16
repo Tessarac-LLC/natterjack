@@ -406,15 +406,24 @@ func TestInboundFromTheVPCIsAllowed(t *testing.T) {
 		t.Run(id, func(t *testing.T) {
 			e := goodENI("eni-a", "us-east-2a")
 			group(id)(e)
-			if s := slots(t, newFake(e))["eni-a"]; !s.Usable() {
+			s := slots(t, newFake(e))["eni-a"]
+			if !s.Usable() {
 				t.Fatalf("a slot admitting only its VPC must be usable: %v", s.Problems)
+			}
+			// The gateway forwards routed traffic only from these, so a
+			// packet spoofing any other source is dropped.
+			if want := []string{"10.0.0.0/16", "100.64.0.0/16"}; !slices.Equal(s.RoutedSources, want) {
+				t.Fatalf("RoutedSources = %v, want the VPC's associated blocks %v", s.RoutedSources, want)
 			}
 		})
 	}
 	// Without inbound rules the VPC is never looked up, so the call needs
-	// no permission until a cluster uses bootstrap routes.
+	// no permission until a cluster uses bootstrap routes, and nothing
+	// routed can reach the slot, so it forwards nothing routed.
 	f := newFake(goodENI("eni-a", "us-east-2a"))
-	slots(t, f)
+	if s := slots(t, f)["eni-a"]; len(s.RoutedSources) != 0 {
+		t.Fatalf("RoutedSources = %v without inbound rules, want none", s.RoutedSources)
+	}
 	if f.vpcCalls != 0 {
 		t.Fatalf("DescribeVpcs called %d times with no inbound rules", f.vpcCalls)
 	}

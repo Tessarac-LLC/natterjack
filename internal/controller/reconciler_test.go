@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -247,7 +248,7 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 	h.node("lc-2", "us-east-2a")
 	h.agent("lifecycle", "lc-1")
 	h.agent("lifecycle", "lc-2")
-	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", Tags: map[string]string{}}
+	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", RoutedSources: []string{"10.0.0.0/16"}, Tags: map[string]string{}}
 
 	// Attach to the first node; the agent pod carries the assignment.
 	h.reconcile()
@@ -260,7 +261,7 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Labels[v1.LabelGateway] != "true" || p.Labels[v1.LabelPool] != "lifecycle" ||
-		g != (v1.Gateway{Pool: "lifecycle", SlotID: "eni-1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", PublicIP: "203.0.113.1", Tunnel: v1.TunnelGeneve}) {
+		!reflect.DeepEqual(g, v1.Gateway{Pool: "lifecycle", SlotID: "eni-1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", PublicIP: "203.0.113.1", RoutedSources: []string{"10.0.0.0/16"}, Tunnel: v1.TunnelGeneve}) {
 		t.Fatalf("agent contract not written: labels %v gateway %+v", p.Labels, g)
 	}
 	if s := h.slotState(); s.State != v1.SlotAttaching || s.Node != "lc-1" {

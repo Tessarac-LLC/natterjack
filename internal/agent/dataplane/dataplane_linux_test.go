@@ -509,12 +509,35 @@ func TestSingleNodeGateway(t *testing.T) {
 	v := vpcNode(t, w)
 	booting := *want
 	booting.Nodes = append(slices.Clone(want.Nodes), netip.MustParseAddr(vpcNodeIP))
+	role := *want.Gateway
+	role.Routed = []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16")}
+	booting.Gateway = &role
 	_, err = dp.Apply(&booting)
 	must(t, err)
 	var routed string
 	inNS(t, v, func() error { routed = echo(t, seen); return nil })
 	if routed != slotIP {
 		t.Fatalf("a node on the bootstrap route reached the internet from %q, want %s\ngateway namespace:\n%s\nworld:\n%s", routed, slotIP, nsDump(t, dp.gw.ns), nsDump(t, w))
+	}
+	// A source outside the VPC's blocks can only be forged: the slot must
+	// not translate it and send it out from its public address, though the
+	// destination is on the internet and the source is a private address.
+	role.Routed = []netip.Prefix{netip.MustParsePrefix("10.99.0.0/16")}
+	_, err = dp.Apply(&booting)
+	must(t, err)
+	for len(seen) > 0 {
+		<-seen
+	}
+	// Only the internet host's view counts: a forged packet needs no reply
+	// to do harm.
+	inNS(t, v, func() error { routed = echoWith(t, nil, "forged"); return nil })
+	select {
+	case got := <-seen:
+		t.Fatalf("a source outside the routed blocks left through the slot: the internet saw %q\ngateway namespace:\n%s", got, nsDump(t, dp.gw.ns))
+	default:
+	}
+	if !strings.HasPrefix(routed, "no reply") {
+		t.Fatalf("a source outside the routed blocks got a reply through the slot: %q", routed)
 	}
 	_, err = dp.Apply(want)
 	must(t, err)
