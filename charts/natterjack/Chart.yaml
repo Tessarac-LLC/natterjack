@@ -37,3 +37,10 @@ annotations:
       name: clusteregresspolicies.natterjack.io
       displayName: ClusterEgressPolicy
       description: Selects pods across namespaces, or node traffic, for a pool.
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://natterjack.io/docs/
+    - name: Helm values reference
+      url: https://natterjack.io/docs/reference/helm-values/
+    - name: Security policy
+      url: https://github.com/Tessarac-LLC/natterjack/security/policy
