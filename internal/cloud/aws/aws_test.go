@@ -332,6 +332,22 @@ func TestHealthySlot(t *testing.T) {
 	}
 }
 
+// A route to a slot that is not attached is a blackhole, which is when the
+// slot most needs placing first: the nodes behind it have no way out.
+func TestRouteToADetachedSlotCounts(t *testing.T) {
+	f := newFake(goodENI("eni-a", "us-east-2a"))
+	for i := range f.tables {
+		for j := range f.tables[i].Routes {
+			if aws.ToString(f.tables[i].Routes[j].NetworkInterfaceId) == "eni-a" {
+				f.tables[i].Routes[j].State = types.RouteStateBlackhole
+			}
+		}
+	}
+	if s := slots(t, f)["eni-a"]; !s.RouteTarget {
+		t.Fatal("a blackholed route to a detached slot must still make it a route target")
+	}
+}
+
 func TestSafetyChecks(t *testing.T) {
 	cases := []struct {
 		name   string

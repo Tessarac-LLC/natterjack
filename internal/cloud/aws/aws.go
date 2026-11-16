@@ -325,8 +325,10 @@ func (p *Provider) routes(ctx context.Context, enis []types.NetworkInterface) (i
 				explicit[aws.ToString(a.SubnetId)] = t
 			}
 		}
+		// A route to a detached slot is a blackhole, and counts all the
+		// same: the nodes behind it are waiting for that slot.
 		for _, r := range t.Routes {
-			if r.NetworkInterfaceId != nil && r.State != types.RouteStateBlackhole {
+			if r.NetworkInterfaceId != nil {
 				targets[aws.ToString(r.NetworkInterfaceId)] = true
 			}
 		}

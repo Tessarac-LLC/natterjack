@@ -509,7 +509,12 @@ func (f *EC2) describeRouteTables(q query) (any, error) {
 	}
 	for i, s := range f.cfg.Slots {
 		if s.RouteTarget {
-			main.Routes = append(main.Routes, routeXML{Dest: fmt.Sprintf("192.168.%d.0/24", i), ENI: s.ID, State: "active"})
+			// As in EC2, a route to a detached interface is a blackhole.
+			state := "blackhole"
+			if f.attached[s.ID] != nil {
+				state = "active"
+			}
+			main.Routes = append(main.Routes, routeXML{Dest: fmt.Sprintf("192.168.%d.0/24", i), ENI: s.ID, State: state})
 		}
 	}
 	tables := []rtXML{main}
