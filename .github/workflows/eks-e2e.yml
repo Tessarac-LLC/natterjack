@@ -4,9 +4,11 @@ name: eks-e2e
 # hack/eks-e2e.sh against it (install, failover, interface limits, broken
 # identity, IaC drift, attacks, throughput, uninstall) and destroys it.
 #
-# It runs as an AWS role that trusts only this repository's eks-e2e
-# environment, whose deployment-branch policy admits main alone: pull
-# requests never reach it. Every resource lives in us-east-2.
+# It runs in an AWS account of its own, as a role that trusts only this
+# repository's eks-e2e environment, whose deployment policy admits main and
+# release tags alone: pull requests never reach it. The environment's
+# variables (role, permissions boundary, state bucket, region) are written by
+# Terraform from the account's own outputs.
 
 on:
   schedule:
@@ -24,7 +26,6 @@ concurrency:
 env:
   GOWORK: "off"
   GOTOOLCHAIN: local
-  AWS_REGION: us-east-2
 
 jobs:
   e2e:
@@ -38,6 +39,9 @@ jobs:
     env:
       TF_VAR_run_id: gh${{ github.run_id }}-${{ github.run_attempt }}
       TF_VAR_permissions_boundary: ${{ vars.AWS_PERMISSIONS_BOUNDARY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_VAR_region: ${{ vars.AWS_REGION }}
+      REGION: ${{ vars.AWS_REGION }} # hack/eks-e2e-sweep.sh
       OUT: ${{ github.workspace }}/out
     steps:
       - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -59,7 +63,7 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           role-session-name: natterjack-eks-e2e-${{ github.run_id }}
           role-duration-seconds: 14400
-          aws-region: us-east-2
+          aws-region: ${{ vars.AWS_REGION }}
 
       # The cluster's public API endpoint admits only this runner.
       - name: Find this runner's address
@@ -79,7 +83,7 @@ jobs:
             backend "s3" {
               bucket       = "$STATE_BUCKET"
               key          = "runs/$TF_VAR_run_id.tfstate"
-              region       = "us-east-1"
+              region       = "$AWS_REGION"
               encrypt      = true
               use_lockfile = true
             }
