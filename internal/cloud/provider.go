@@ -45,6 +45,9 @@ type Slot struct {
 	Instance string
 	// InstanceInCluster reports whether Instance belongs to this cluster.
 	InstanceInCluster bool
+	// RoutedSources are the only sources a route table may send through the
+	// slot: on AWS, its VPC's IPv4 blocks, sorted.
+	RoutedSources []string
 	// RouteTarget is true when a route table sends traffic to this slot, so
 	// node traffic depends on it before agents steer anything.
 	RouteTarget bool

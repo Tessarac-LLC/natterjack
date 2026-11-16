@@ -98,6 +98,10 @@ datapath-e2e: chart-tools ## Send real egress traffic through a kind cluster and
 		ISTIO_VERSION=$(ISTIO_VERSION) LINKERD_VERSION=$(LINKERD_VERSION) GATEWAY_API_VERSION=$(GATEWAY_API_VERSION) \
 		MESH=$(MESH) ./hack/datapath-e2e.sh $(CNI) $(KIND_NODE_IMAGE)
 
+.PHONY: eks-e2e
+eks-e2e: chart-tools ## Run the end-to-end suite on the EKS cluster test/eks built (needs AWS credentials, OUT, TF_VAR_run_id, TF_VAR_api_allowed_cidrs)
+	PATH="$(CHART_PATH)" ./hack/eks-e2e.sh
+
 .PHONY: chart-tools
 chart-tools: $(HELM) $(KUBECONFORM) $(KIND) $(KO) $(HELM_DOCS) $(CRANE)
 	mkdir -p $(BIN)/chart-tools

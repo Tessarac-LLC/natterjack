@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"slices"
 	"sort"
@@ -50,6 +51,7 @@ type EC2 interface {
 	DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesInput, ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
 	DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	DescribeSubnets(context.Context, *ec2.DescribeSubnetsInput, ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
+	DescribeVpcs(context.Context, *ec2.DescribeVpcsInput, ...func(*ec2.Options)) (*ec2.DescribeVpcsOutput, error)
 	AttachNetworkInterface(context.Context, *ec2.AttachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.AttachNetworkInterfaceOutput, error)
 	DetachNetworkInterface(context.Context, *ec2.DetachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.DetachNetworkInterfaceOutput, error)
 }
@@ -124,14 +126,15 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 	for i := range enis {
 		e := &enis[i]
 		s := cloud.Slot{
-			ID:          aws.ToString(e.NetworkInterfaceId),
-			Zone:        aws.ToString(e.AvailabilityZone),
-			PrivateIP:   aws.ToString(e.PrivateIpAddress),
-			MAC:         aws.ToString(e.MacAddress),
-			SubnetID:    aws.ToString(e.SubnetId),
-			SubnetCIDR:  cidrs[aws.ToString(e.SubnetId)],
-			RouteTarget: routeTargets[aws.ToString(e.NetworkInterfaceId)],
-			Tags:        make(map[string]string, len(e.TagSet)),
+			ID:            aws.ToString(e.NetworkInterfaceId),
+			Zone:          aws.ToString(e.AvailabilityZone),
+			PrivateIP:     aws.ToString(e.PrivateIpAddress),
+			MAC:           aws.ToString(e.MacAddress),
+			SubnetID:      aws.ToString(e.SubnetId),
+			SubnetCIDR:    cidrs[aws.ToString(e.SubnetId)],
+			RouteTarget:   routeTargets[aws.ToString(e.NetworkInterfaceId)],
+			RoutedSources: ins.routedSources(e),
+			Tags:          make(map[string]string, len(e.TagSet)),
 		}
 		for _, t := range e.TagSet {
 			s.Tags[aws.ToString(t.Key)] = aws.ToString(t.Value)
@@ -143,7 +146,7 @@ func (p *Provider) Slots(ctx context.Context, d cloud.Discovery) ([]cloud.Slot, 
 			s.Instance = aws.ToString(e.Attachment.InstanceId)
 			s.InstanceInCluster = inCluster[s.Instance]
 		}
-		s.Problems = problems(e, ins, igw, cidrs)
+		s.Problems = problems(e, ins.wide, igw, cidrs)
 		slots = append(slots, s)
 	}
 	sort.Slice(slots, func(i, j int) bool { return slots[i].ID < slots[j].ID })
@@ -173,7 +176,7 @@ func problems(e *types.NetworkInterface, inbound, igw map[string]bool, cidrs map
 	}
 	for _, g := range e.Groups {
 		if inbound[aws.ToString(g.GroupId)] {
-			out = append(out, fmt.Sprintf("security group %s allows inbound traffic; a slot's security groups must have no inbound rules", aws.ToString(g.GroupId)))
+			out = append(out, fmt.Sprintf("security group %s allows inbound traffic from outside the VPC; a slot's security groups may admit only the VPC's own IPv4 blocks", aws.ToString(g.GroupId)))
 		}
 	}
 	if cidrs[aws.ToString(e.SubnetId)] == "" {
@@ -191,8 +194,34 @@ func hasTag(tags []types.Tag, key, value string) bool {
 	})
 }
 
-// inboundRules reports, per security group, whether it has any inbound rule.
-func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterface) (map[string]bool, error) {
+// groupRules describes the slots' security groups' inbound rules.
+type groupRules struct {
+	// wide reports, per group, whether it admits anything but its VPC's
+	// own IPv4 blocks (a group that cannot be read counts as wide).
+	wide map[string]bool
+	// ruled holds the groups with any inbound rule.
+	ruled map[string]bool
+	// blocks are the IPv4 blocks of the ruled groups' VPCs.
+	blocks map[string][]netip.Prefix
+}
+
+// routedSources are the sources a route table may send through e: its VPC's
+// blocks when one of its groups admits them, and none otherwise, since
+// nothing routed can then reach it.
+func (in groupRules) routedSources(e *types.NetworkInterface) []string {
+	for _, g := range e.Groups {
+		if in.ruled[aws.ToString(g.GroupId)] {
+			return prefixStrings(in.blocks[aws.ToString(e.VpcId)])
+		}
+	}
+	return nil
+}
+
+// inboundRules reads the slots' security groups. A bootstrap route sends the
+// VPC's traffic through a slot, and the VPC applies the slot's groups to it,
+// so a rule admitting the VPC is needed; anything wider would expose the
+// gateway.
+func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterface) (groupRules, error) {
 	var ids []string
 	for i := range enis {
 		for _, g := range enis[i].Groups {
@@ -201,17 +230,23 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 	}
 	ids = unique(ids)
 	out := map[string]bool{}
+	in := groupRules{wide: out, ruled: map[string]bool{}}
 	if len(ids) == 0 {
-		return out, nil
+		return in, nil
 	}
+	var withRules []types.SecurityGroup
 	pager := ec2.NewDescribeSecurityGroupsPaginator(p.ec2, &ec2.DescribeSecurityGroupsInput{GroupIds: ids})
 	for pager.HasMorePages() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("describe security groups: %w", err)
+			return in, fmt.Errorf("describe security groups: %w", err)
 		}
 		for _, g := range page.SecurityGroups {
-			out[aws.ToString(g.GroupId)] = len(g.IpPermissions) > 0
+			out[aws.ToString(g.GroupId)] = false
+			if len(g.IpPermissions) > 0 {
+				withRules = append(withRules, g)
+				in.ruled[aws.ToString(g.GroupId)] = true
+			}
 		}
 	}
 	for _, id := range ids {
@@ -220,7 +255,84 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 			out[id] = true
 		}
 	}
+	if len(withRules) == 0 {
+		return in, nil
+	}
+	var vpcIDs []string
+	for _, g := range withRules {
+		vpcIDs = append(vpcIDs, aws.ToString(g.VpcId))
+	}
+	blocks, err := p.vpcBlocks(ctx, vpcIDs)
+	if err != nil {
+		return in, err
+	}
+	in.blocks = blocks
+	for _, g := range withRules {
+		out[aws.ToString(g.GroupId)] = !withinVPC(g.IpPermissions, blocks[aws.ToString(g.VpcId)])
+	}
+	return in, nil
+}
+
+// vpcBlocks returns each VPC's associated IPv4 blocks, sorted.
+func (p *Provider) vpcBlocks(ctx context.Context, ids []string) (map[string][]netip.Prefix, error) {
+	vpcs := slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return id == "" })
+	out := map[string][]netip.Prefix{}
+	if vpcs = unique(vpcs); len(vpcs) == 0 {
+		return out, nil
+	}
+	pager := ec2.NewDescribeVpcsPaginator(p.ec2, &ec2.DescribeVpcsInput{VpcIds: vpcs})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe vpcs: %w", err)
+		}
+		for _, v := range page.Vpcs {
+			for _, a := range v.CidrBlockAssociationSet {
+				if a.CidrBlockState == nil || a.CidrBlockState.State != types.VpcCidrBlockStateCodeAssociated {
+					continue
+				}
+				if b, err := netip.ParsePrefix(aws.ToString(a.CidrBlock)); err == nil {
+					out[aws.ToString(v.VpcId)] = append(out[aws.ToString(v.VpcId)], b.Masked())
+				}
+			}
+		}
+	}
 	return out, nil
+}
+
+// prefixStrings formats prefixes, sorted by address then length.
+func prefixStrings(ps []netip.Prefix) []string {
+	ps = slices.Clone(ps)
+	slices.SortFunc(ps, func(a, b netip.Prefix) int {
+		if c := a.Addr().Compare(b.Addr()); c != 0 {
+			return c
+		}
+		return a.Bits() - b.Bits()
+	})
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, p.String())
+	}
+	return slices.Compact(out)
+}
+
+// withinVPC reports whether every inbound source is an IPv4 CIDR inside one
+// of blocks. IPv6 ranges, prefix lists and group references never are.
+func withinVPC(perms []types.IpPermission, blocks []netip.Prefix) bool {
+	for _, perm := range perms {
+		if len(perm.IpRanges) == 0 || len(perm.Ipv6Ranges) > 0 || len(perm.PrefixListIds) > 0 || len(perm.UserIdGroupPairs) > 0 {
+			return false
+		}
+		for _, r := range perm.IpRanges {
+			src, err := netip.ParsePrefix(aws.ToString(r.CidrIp))
+			if err != nil || !slices.ContainsFunc(blocks, func(b netip.Prefix) bool {
+				return b.Bits() <= src.Bits() && b.Contains(src.Addr())
+			}) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // routes reports which subnets route 0.0.0.0/0 to an internet gateway, and
@@ -255,8 +367,10 @@ func (p *Provider) routes(ctx context.Context, enis []types.NetworkInterface) (i
 				explicit[aws.ToString(a.SubnetId)] = t
 			}
 		}
+		// A route to a detached slot is a blackhole, and counts all the
+		// same: the nodes behind it are waiting for that slot.
 		for _, r := range t.Routes {
-			if r.NetworkInterfaceId != nil && r.State != types.RouteStateBlackhole {
+			if r.NetworkInterfaceId != nil {
 				targets[aws.ToString(r.NetworkInterfaceId)] = true
 			}
 		}
@@ -398,10 +512,20 @@ func (p *Provider) Attach(ctx context.Context, slotID, instanceID string) error 
 		InstanceId:         aws.String(instanceID),
 		DeviceIndex:        aws.Int32(idx),
 	})
+	if isAttachmentLimit(err) {
+		return fmt.Errorf("attach %s to %s: %w: %w", slotID, instanceID, cloud.ErrNoFreeDeviceIndex, err)
+	}
 	if err != nil {
 		return fmt.Errorf("attach %s to %s: %w", slotID, instanceID, err)
 	}
 	return nil
+}
+
+// isAttachmentLimit reports whether EC2 refused an attach because the
+// instance already holds as many interfaces as its type allows.
+func isAttachmentLimit(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "AttachmentLimitExceeded"
 }
 
 // freeDeviceIndex returns the lowest unused device index above 0 on network card 0.
@@ -412,7 +536,8 @@ func freeDeviceIndex(inst *types.Instance) (int32, error) {
 			used[aws.ToInt32(a.DeviceIndex)] = true
 		}
 	}
-	// The per-type ENI limit is enforced by EC2; 64 is above every instance type.
+	// EC2 enforces the per-type interface limit (see isAttachmentLimit);
+	// 64 is above every instance type.
 	for i := int32(1); i < 64; i++ {
 		if !used[i] {
 			return i, nil

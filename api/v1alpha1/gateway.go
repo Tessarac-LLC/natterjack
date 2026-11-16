@@ -47,6 +47,10 @@ type Gateway struct {
 	PublicIP string `json:"publicIP"`
 	// Tunnel between source nodes and this gateway.
 	Tunnel TunnelType `json:"tunnel"`
+	// RoutedSources are the only sources a route table may send through the
+	// slot (on AWS, the VPC's IPv4 blocks). The gateway forwards nothing else
+	// that arrives on the slot.
+	RoutedSources []string `json:"routedSources,omitempty"`
 }
 
 // GatewayReadyMessage is the message of a true ConditionGatewayReady. It

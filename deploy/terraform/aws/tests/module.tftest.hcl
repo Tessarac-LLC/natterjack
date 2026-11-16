@@ -5,6 +5,9 @@ mock_provider "aws" {
       availability_zone = "us-east-1a"
     }
   }
+  mock_data "aws_vpc" {
+    defaults = { cidr_block = "10.40.0.0/16" }
+  }
   mock_resource "aws_network_interface" {
     defaults = { id = "eni-00000000000000000" }
   }
@@ -201,6 +204,59 @@ run "slot_subnet_keyed_by_another_zone_is_refused" {
 
 # Subnets, route tables and security groups created in the same apply have no
 # IDs at plan time.
+run "slots_take_no_inbound_traffic_without_bootstrap_routes" {
+  command = plan
+
+  assert {
+    condition     = length(aws_vpc_security_group_ingress_rule.slot_routed) == 0
+    error_message = "Without bootstrap routes nothing may enter a slot."
+  }
+}
+
+run "bootstrap_routes_admit_the_vpc_to_the_slots" {
+  command = plan
+
+  variables {
+    bootstrap_route_table_ids = { "us-east-1a" = "rtb-0000000000000000a" }
+  }
+
+  # The VPC applies the slot's security group to traffic a route table sends
+  # through it, as it does for any NAT instance.
+  assert {
+    condition = (
+      length(aws_vpc_security_group_ingress_rule.slot_routed) == 1 &&
+      aws_vpc_security_group_ingress_rule.slot_routed[0].cidr_ipv4 == "10.40.0.0/16" &&
+      aws_vpc_security_group_ingress_rule.slot_routed[0].ip_protocol == "-1"
+    )
+    error_message = "With bootstrap routes the slots admit the VPC's CIDR, every protocol."
+  }
+}
+
+run "bootstrap_source_cidrs_replace_the_vpc_cidr" {
+  command = plan
+
+  variables {
+    bootstrap_route_table_ids = { "us-east-1a" = "rtb-0000000000000000a" }
+    bootstrap_source_cidrs    = ["10.40.16.0/20", "100.64.0.0/16"]
+  }
+
+  assert {
+    condition     = [for r in aws_vpc_security_group_ingress_rule.slot_routed : r.cidr_ipv4] == ["10.40.16.0/20", "100.64.0.0/16"]
+    error_message = "bootstrap_source_cidrs are the only sources admitted."
+  }
+}
+
+run "bad_bootstrap_source_cidrs_are_refused" {
+  command = plan
+
+  variables {
+    bootstrap_route_table_ids = { "us-east-1a" = "rtb-0000000000000000a" }
+    bootstrap_source_cidrs    = ["0.0.0.0/0"]
+  }
+
+  expect_failures = [var.bootstrap_source_cidrs]
+}
+
 run "plans_with_subnets_created_in_the_same_apply" {
   command = plan
 
@@ -211,5 +267,18 @@ run "plans_with_subnets_created_in_the_same_apply" {
   assert {
     condition     = length(module.natterjack.slots) == 4
     error_message = "Two zones with two slots each."
+  }
+}
+
+run "permissions_boundary_on_the_controller_role" {
+  command = plan
+
+  variables {
+    permissions_boundary = "arn:aws:iam::111122223333:policy/boundary"
+  }
+
+  assert {
+    condition     = aws_iam_role.controller.permissions_boundary == "arn:aws:iam::111122223333:policy/boundary"
+    error_message = "The controller role carries the given permissions boundary."
   }
 }

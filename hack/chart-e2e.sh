@@ -98,7 +98,7 @@ done
 
 step "no RBAC denials in any log"
 sleep 20 # one agent resync and a controller pass
-if kubectl -n "$ns" logs -l app.kubernetes.io/part-of=natterjack --tail=-1 --prefix | grep -iE 'forbidden|is not allowed|cannot (get|list|watch|patch|create|update)'; then
+if kubectl -n "$ns" logs -l app.kubernetes.io/part-of=natterjack --tail=-1 --prefix | grep -iE 'forbidden|is not allowed|cannot (get|list|watch|patch|create|update) resource'; then
 	fail "a component was denied an API call it makes"
 fi
 

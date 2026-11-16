@@ -60,14 +60,18 @@ token allowed to read them, checked with `TokenReview` and
 
 ## The data path
 
-- **Slots take no inbound connections.** A slot's security group has no
-  inbound rules; the controller quarantines a slot whose group gains one, or
-  whose source/destination check is turned back on.
+- **Slots take no connections from the internet.** A slot's security group
+  admits at most the VPC's own IPv4 blocks, which a bootstrap route needs;
+  the controller quarantines a slot whose group admits any other source
+  (another CIDR, IPv6, a prefix list or a security group), or whose
+  source/destination check is turned back on.
 - **The slot lives in its own network namespace.** The node's processes, CNI
   and firewall never see it. In that namespace, nftables drops everything
   except replies to flows that left, Natterjack's own probes from cluster
-  nodes, and new flows that came from a cluster node over the tunnel or from
-  a private address over the VPC route table.
+  nodes, and new flows that came from a cluster node over the tunnel or,
+  over the VPC route table, from one of the VPC's own IPv4 blocks. A packet
+  arriving on the slot from any other source, private or not, can only be
+  forged, and is dropped before translation.
 - **Tunnel packets come only from cluster nodes.** Each node drops GENEVE and
   WireGuard packets from any other address, and forwards a tunnel's new flows
   only into its own gateway namespace.

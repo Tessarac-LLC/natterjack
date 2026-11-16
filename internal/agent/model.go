@@ -43,6 +43,9 @@ type Desired struct {
 	// Rings map each pool's buckets to gateway marks. A pool with no live
 	// gateway has no ring, and its traffic is left to the node's own routes.
 	Rings map[string][Buckets]uint32
+	// CrossZone are the pools, sorted, whose rings use other zones'
+	// gateways because none in this node's zone is live.
+	CrossZone []string
 	// Gateways map each mark in use to the gateway's node IP. Marks stay
 	// while a gateway drains so its established flows keep working.
 	Gateways map[uint32]netip.Addr
@@ -84,6 +87,10 @@ type GatewayRole struct {
 	Router netip.Addr
 	// Public is the address traffic leaves from, checked by the self-test.
 	Public netip.Addr
+	// Routed are the only sources a route table may send through the slot.
+	// Traffic arriving on the slot from anywhere else is dropped, so a
+	// packet with a forged source is never translated and sent out.
+	Routed []netip.Prefix
 	// Draining is set when the gateway must stop taking new flows.
 	Draining bool
 	// WireGuard is set when the pool encrypts its tunnel. The gateway then

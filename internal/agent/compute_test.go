@@ -18,6 +18,7 @@ package agent
 
 import (
 	"encoding/json"
+	"maps"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -112,6 +113,9 @@ func TestRingPrefersOwnZone(t *testing.T) {
 	if d.NodeIP != ip("10.0.1.50") || len(d.Nodes) != 4 {
 		t.Fatalf("node %v nodes %v", d.NodeIP, d.Nodes)
 	}
+	if len(d.CrossZone) != 0 {
+		t.Fatalf("cross-zone pools %v with live gateways in the zone", d.CrossZone)
+	}
 }
 
 func TestRingFallsBackAcrossZones(t *testing.T) {
@@ -122,11 +126,47 @@ func TestRingFallsBackAcrossZones(t *testing.T) {
 	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.2.10")}) {
 		t.Fatalf("ring uses %v; want the other zone when this zone has no live gateway", got)
 	}
+	if want := slices.Collect(maps.Keys(d.Rings)); !slices.Equal(d.CrossZone, want) {
+		t.Fatalf("cross-zone pools %v, want %v", d.CrossZone, want)
+	}
 	if len(d.Gateways) != 3 {
 		t.Fatal("down and draining gateways keep their marks")
 	}
 	if len(d.Failed) != 1 || d.Gateways[d.Failed[0]] != ip("10.0.1.10") {
 		t.Fatalf("failed marks %v; want only the down gateway's, not the draining one's", d.Failed)
+	}
+}
+
+// A terminated instance can lose its slot while it still answers probes for
+// the rest of its shutdown; its kubelet says so first.
+func TestGatewayOnAShuttingDownNodeTakesNoNewFlows(t *testing.T) {
+	s := cluster()
+	ready := func(status corev1.ConditionStatus, msg string) []corev1.NodeCondition {
+		return []corev1.NodeCondition{{Type: corev1.NodeReady, Status: status, Reason: "KubeletNotReady", Message: msg}}
+	}
+	s.Nodes[0].Status.Conditions = ready(corev1.ConditionFalse, "node is shutting down")
+	d, problems := Compute(s, mustMarks(t))
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.11")}) {
+		t.Fatalf("ring uses %v; a gateway whose node is shutting down must take no new flows", got)
+	}
+	if len(d.Gateways) != 3 || len(d.Failed) != 0 {
+		t.Fatalf("marks %v failed %v; the gateway keeps its mark and its flows are not flushed", d.Gateways, d.Failed)
+	}
+	// Any other reason for NotReady, such as a kubelet that lost the API
+	// server, says nothing about the slot: the probes decide.
+	for _, c := range [][]corev1.NodeCondition{
+		ready(corev1.ConditionUnknown, "Kubelet stopped posting node status."),
+		ready(corev1.ConditionFalse, "container runtime network not ready"),
+		ready(corev1.ConditionTrue, "kubelet is posting ready status"),
+	} {
+		s.Nodes[0].Status.Conditions = c
+		d, _ = Compute(s, mustMarks(t))
+		if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.1.10"), ip("10.0.1.11")}) {
+			t.Fatalf("Ready %s %q: ring uses %v", c[0].Status, c[0].Message, got)
+		}
 	}
 }
 
@@ -277,15 +317,31 @@ func TestGatewayRole(t *testing.T) {
 	self := gatewayPod("src", false)
 	self.Annotations = map[string]string{v1.AnnotationGateway: gatewayAnnotation(t, v1.Gateway{
 		Pool: "web", SlotID: "eni-1", MAC: "02:AA:00:00:00:01", PrivateIP: "10.0.9.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9",
+		RoutedSources: []string{"10.0.0.0/16", "100.64.0.0/16"},
 	})}
 	s.Self = &self
 	d, problems := Compute(s, mustMarks(t))
 	if len(problems) != 0 {
 		t.Fatal(problems)
 	}
-	want := GatewayRole{Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9")}
+	want := GatewayRole{
+		Pool: "web", SlotID: "eni-1", MAC: "02:aa:00:00:00:01", Address: netip.MustParsePrefix("10.0.9.20/24"), Router: ip("10.0.9.1"), Public: ip("203.0.113.9"),
+		Routed: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/16"), netip.MustParsePrefix("100.64.0.0/16")},
+	}
 	if d.Gateway == nil || !reflect.DeepEqual(*d.Gateway, want) {
 		t.Fatalf("role %+v", d.Gateway)
+	}
+
+	// A routed source the agent cannot read would otherwise be dropped from
+	// the set silently; refusing the role keeps the old ruleset in place.
+	for _, bad := range []string{"10.0.0.0", "2001:db8::/32", "10.0.0.0/33"} {
+		self.Annotations[v1.AnnotationGateway] = gatewayAnnotation(t, v1.Gateway{
+			Pool: "web", SlotID: "eni-1", PrivateIP: "10.0.9.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9", RoutedSources: []string{bad},
+		})
+		d, problems = Compute(s, mustMarks(t))
+		if d.Gateway != nil || len(problems) != 1 || !strings.Contains(problems[0], "invalid routed source") {
+			t.Fatalf("routed source %q: role %+v problems %v", bad, d.Gateway, problems)
+		}
 	}
 
 	self.Annotations[v1.AnnotationGateway] = gatewayAnnotation(t, v1.Gateway{Pool: "web", SlotID: "eni-1", PrivateIP: "10.0.8.20", SubnetCIDR: "10.0.9.0/24", PublicIP: "203.0.113.9"})

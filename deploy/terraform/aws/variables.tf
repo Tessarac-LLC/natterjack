@@ -40,6 +40,19 @@ variable "bootstrap_route_table_ids" {
   }
 }
 
+variable "bootstrap_source_cidrs" {
+  description = "Sources the slots admit when bootstrap_route_table_ids is set: the addresses of the nodes and pods behind those route tables. Null admits the VPC's primary CIDR; list a secondary CIDR here if nodes or pods use one."
+  type        = list(string)
+  default     = null
+
+  validation {
+    condition = var.bootstrap_source_cidrs == null || alltrue([
+      for c in coalesce(var.bootstrap_source_cidrs, []) : can(cidrhost(c, 0)) && can(regex("^[0-9.]+/[0-9]+$", c)) && tonumber(split("/", c)[1]) >= 8
+    ])
+    error_message = "bootstrap_source_cidrs must be IPv4 CIDRs no wider than /8."
+  }
+}
+
 variable "node_security_group_ids" {
   description = "Security groups of the cluster's nodes. The module allows the agent tunnels (UDP) from each of these groups to each. Empty to manage the rules yourself."
   type        = list(string)
@@ -101,4 +114,10 @@ variable "tags" {
   description = "Tags added to every resource the module creates. Cannot override the natterjack.io and no_manage tags."
   type        = map(string)
   default     = {}
+}
+
+variable "permissions_boundary" {
+  description = "ARN of a permissions boundary for the controller's IAM role, for accounts that require one on every role. Null for none."
+  type        = string
+  default     = null
 }

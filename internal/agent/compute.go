@@ -79,6 +79,7 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 
 	ipOf := map[string]netip.Addr{}
 	zoneOf := map[string]string{}
+	stopping := map[string]bool{}
 	for i := range s.Nodes {
 		n := &s.Nodes[i]
 		if ip, ok := NodeIP(n); ok {
@@ -86,6 +87,7 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 			d.Nodes = append(d.Nodes, ip)
 		}
 		zoneOf[n.Name] = n.Labels[corev1.LabelTopologyZone]
+		stopping[n.Name] = ShuttingDown(n)
 	}
 	slices.SortFunc(d.Nodes, func(a, b netip.Addr) int { return a.Compare(b) })
 	d.Nodes = slices.Compact(d.Nodes)
@@ -146,10 +148,12 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 		}
 		all = append(all, ip)
 		// A gateway takes new flows once its agent says its slot carries
-		// traffic, until it drains or this node's probes lose it.
+		// traffic, until it drains, its node starts shutting down, or this
+		// node's probes lose it.
 		var g v1.Gateway
 		ready := json.Unmarshal([]byte(p.Annotations[v1.AnnotationGateway]), &g) == nil &&
-			v1.GatewayReady(p, g.SlotID) && p.Annotations[v1.AnnotationDrainStarted] == "" && !s.Down[ip]
+			v1.GatewayReady(p, g.SlotID) && p.Annotations[v1.AnnotationDrainStarted] == "" &&
+			!stopping[p.Spec.NodeName] && !s.Down[ip]
 		if g.Tunnel == v1.TunnelWireGuard {
 			// Without the gateway's key there is no tunnel to it.
 			wg[ip] = keyOf[ip]
@@ -194,8 +198,10 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 			d.Rings[pool] = Ring(local)
 		case len(anyZone) > 0:
 			d.Rings[pool] = Ring(anyZone)
+			d.CrossZone = append(d.CrossZone, pool)
 		}
 	}
+	slices.Sort(d.CrossZone)
 
 	d.Steers, problems = steers(s, problems)
 	return d, problems
@@ -295,12 +301,20 @@ func gatewayRole(p *corev1.Pod) (*GatewayRole, error) {
 	if err1 != nil || err2 != nil || err3 != nil || !priv.Is4() || !subnet.Contains(priv) || subnet.Bits() > 30 {
 		return nil, fmt.Errorf("gateway assignment for %s is incomplete or inconsistent: private %q, subnet %q, public %q", g.SlotID, g.PrivateIP, g.SubnetCIDR, g.PublicIP)
 	}
+	var routed []netip.Prefix
+	for _, s := range g.RoutedSources {
+		r, err := netip.ParsePrefix(s)
+		if err != nil || !r.Addr().Is4() {
+			return nil, fmt.Errorf("gateway assignment for %s has an invalid routed source %q", g.SlotID, s)
+		}
+		routed = append(routed, r.Masked())
+	}
 	// Every supported cloud puts the subnet router at the first host
 	// address.
 	router := subnet.Masked().Addr().Next()
 	return &GatewayRole{
 		Pool: g.Pool, SlotID: g.SlotID, MAC: strings.ToLower(g.MAC), Address: netip.PrefixFrom(priv, subnet.Bits()),
-		Router: router, Public: pub, Draining: p.Annotations[v1.AnnotationDrainStarted] != "",
+		Router: router, Public: pub, Routed: routed, Draining: p.Annotations[v1.AnnotationDrainStarted] != "",
 		WireGuard: g.Tunnel == v1.TunnelWireGuard,
 	}, nil
 }
@@ -310,6 +324,24 @@ func gatewayRole(p *corev1.Pod) (*GatewayRole, error) {
 func ValidWireGuardKey(key string) bool {
 	b, err := base64.StdEncoding.DecodeString(key)
 	return err == nil && len(b) == 32
+}
+
+// shutdownMessage is what the kubelet's graceful node shutdown puts in the
+// Ready condition as soon as the machine starts to shut down.
+const shutdownMessage = "node is shutting down"
+
+// ShuttingDown reports whether the kubelet says n is shutting down. When an
+// instance is terminated, the cloud may stop its secondary interfaces at
+// once while the machine still answers probes over its primary one for the
+// rest of the shutdown, so a gateway there must take no new flows from the
+// moment its kubelet notices, not from the moment its probes stop.
+func ShuttingDown(n *corev1.Node) bool {
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status != corev1.ConditionTrue && strings.Contains(c.Message, shutdownMessage)
+		}
+	}
+	return false
 }
 
 // NodeIP is the node's IPv4 InternalIP.

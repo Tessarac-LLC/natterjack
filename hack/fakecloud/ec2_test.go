@@ -75,10 +75,10 @@ func testConfig() Config {
 			{ID: "subnet-b", Zone: "zone-b", CIDR: "10.250.2.0/24"},
 			{ID: "subnet-private", Zone: "zone-a", CIDR: "10.250.3.0/24", NoInternet: true},
 		},
-		SecurityGroups: []SecurityGroup{{ID: "sg-closed"}, {ID: "sg-open", Inbound: true}},
+		SecurityGroups: []SecurityGroup{{ID: "sg-closed"}, {ID: "sg-open", Inbound: true}, {ID: "sg-routed", InboundFromVPC: true}},
 		Slots: []Slot{
 			{ID: "eni-a1", Subnet: "subnet-a", PrivateIP: "10.250.1.10", PublicIP: "198.51.100.10", MAC: "02:4e:4a:01:00:0a", Groups: []string{"sg-closed"}, Tags: slotTags("e2e")},
-			{ID: "eni-b1", Subnet: "subnet-b", PrivateIP: "10.250.2.10", PublicIP: "198.51.100.20", MAC: "02:4e:4a:02:00:0a", Groups: []string{"sg-closed"}, Tags: slotTags("e2e"), RouteTarget: true},
+			{ID: "eni-b1", Subnet: "subnet-b", PrivateIP: "10.250.2.10", PublicIP: "198.51.100.20", MAC: "02:4e:4a:02:00:0a", Groups: []string{"sg-closed", "sg-routed"}, Tags: slotTags("e2e"), RouteTarget: true},
 			{ID: "eni-bad", Subnet: "subnet-private", PrivateIP: "10.250.3.10", MAC: "02:4e:4a:03:00:0a", Groups: []string{"sg-open"}, SourceDestCheck: true, Tags: noManage},
 			{ID: "eni-other", Subnet: "subnet-a", PrivateIP: "10.250.1.11", PublicIP: "198.51.100.11", MAC: "02:4e:4a:01:00:0b", Groups: []string{"sg-closed"}, Tags: slotTags("other")},
 		},
@@ -86,6 +86,7 @@ func testConfig() Config {
 			{ID: "i-0000000000000001", Zone: "zone-a", Node: "worker", Tags: inCluster},
 			{ID: "i-0000000000000002", Zone: "zone-b", Node: "worker2", Tags: inCluster},
 			{ID: "i-0000000000000003", Zone: "zone-a", Node: "stranger"},
+			{ID: "i-0000000000000004", Zone: "zone-b", Node: "full", Tags: inCluster, MaxInterfaces: 1},
 		},
 	}
 }
@@ -133,6 +134,9 @@ func TestProviderAgainstFake(t *testing.T) {
 	if !a1.Usable() || a1.PublicIP != "198.51.100.10" || a1.SubnetCIDR != "10.250.1.0/24" ||
 		a1.MAC != "02:4e:4a:01:00:0a" || a1.Zone != "zone-a" || a1.PrivateIP != "10.250.1.10" || a1.Instance != "" {
 		t.Errorf("eni-a1 = %+v", a1)
+	}
+	if b1 := got["eni-b1"]; !b1.Usable() {
+		t.Errorf("eni-b1 admits only its VPC, yet: %v", b1.Problems)
 	}
 	if !got["eni-b1"].RouteTarget || got["eni-a1"].RouteTarget {
 		t.Errorf("route targets: eni-b1 %v, eni-a1 %v", got["eni-b1"].RouteTarget, got["eni-a1"].RouteTarget)
@@ -191,6 +195,22 @@ func TestProviderAgainstFake(t *testing.T) {
 	want := []string{"attach eni-a1 worker", "detach eni-a1", "attach eni-a1 stranger"}
 	if !slices.Equal(links.got(), want) {
 		t.Errorf("links calls %q, want %q", links.got(), want)
+	}
+}
+
+// TestInterfaceLimit checks that an instance at its type's interface limit
+// refuses an attach with EC2's error, which the provider reads as no free slot.
+func TestInterfaceLimit(t *testing.T) {
+	p, links, _ := fakeProvider(t)
+	err := p.Attach(t.Context(), "eni-b1", "i-0000000000000004")
+	if !errors.Is(err, cloud.ErrNoFreeDeviceIndex) || !strings.Contains(err.Error(), "AttachmentLimitExceeded") {
+		t.Fatalf("attach to a full instance: %v", err)
+	}
+	if len(links.got()) != 0 {
+		t.Fatalf("a refused attach moved the interface: %q", links.got())
+	}
+	if err := p.Attach(t.Context(), "eni-b1", "i-0000000000000002"); err != nil {
+		t.Fatalf("attach to an instance with room: %v", err)
 	}
 }
 

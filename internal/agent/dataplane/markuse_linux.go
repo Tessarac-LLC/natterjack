@@ -3,6 +3,7 @@ package dataplane
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,25 +21,88 @@ const markScanEvery = time.Minute
 // routing rules use the mark bits the agent owns. Such a component, for
 // example Calico, which keeps its own marks in 0xffff0000, makes the agent's
 // steering skip or misroute packets without any error, so the clash is
-// reported instead, with the setting that ends it.
+// reported instead, with the setting that ends it. So are policy routing
+// rules that sort ahead of the agent's and would take steered packets.
 func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 	if time.Since(d.marksChecked) < markScanEvery {
 		return d.marksErr
 	}
-	found, err := markConflicts(c, d.cfg.MarkMask, d.ownsTable)
+	found, restored, err := markConflicts(c, d.cfg.MarkMask, d.ownsTable)
 	if err != nil {
 		return err
 	}
+	rules, err := netlink.RuleList(unix.AF_INET)
+	if err != nil {
+		return fmt.Errorf("list policy routing rules: %w", err)
+	}
+	ahead := rulesAhead(rules, d.cfg.RulePriority, restored, d.ownsTable)
 	d.marksChecked, d.marksErr = time.Now(), nil
+	var errs []error
 	if len(found) > 0 {
 		msgs := make([]string, 0, len(found))
 		for _, f := range found {
 			msgs = append(msgs, f.String())
 		}
-		d.marksErr = fmt.Errorf("other rules on the node use the agent's mark bits 0x%08x, so steering would fail: %s; set agent.markMask to bits none of them use",
-			d.cfg.MarkMask, strings.Join(msgs, "; "))
+		errs = append(errs, fmt.Errorf("other rules on the node use the agent's mark bits 0x%08x, so steering would fail: %s; set agent.markMask to bits none of them use",
+			d.cfg.MarkMask, strings.Join(msgs, "; ")))
 	}
+	if len(ahead) > 0 {
+		msgs := make([]string, 0, len(ahead))
+		for _, r := range ahead {
+			msgs = append(msgs, describeRule(&r))
+		}
+		errs = append(errs, fmt.Errorf("policy routing rules sort ahead of the agent's (priority %d) and can route steered traffic past its gateways: %s; set agent.rulePriority below %d",
+			d.cfg.RulePriority, strings.Join(msgs, "; "), ahead[0].Priority))
+	}
+	d.marksErr = errors.Join(errs...)
 	return d.marksErr
+}
+
+// rulesAhead lists the policy routing rules that sort ahead of the agent's
+// and choose a route by a packet's source or incoming interface, or by mark
+// bits that other rules restore from the connection mark (restored). A
+// steered packet that one of them matches never reaches the agent's rules:
+// the AWS VPC CNI, for example, gives every outbound pod connection
+// connection mark 0x80, restores it onto each packet and sends such packets
+// to the main table at priority 1024. A mark set on a packet alone, as
+// Cilium sets 0x200 on packets for its proxy, belongs to traffic that
+// component handles, and rules that only match a destination never match
+// steered traffic, which is bound for the internet. The lookup of the local
+// table is left out too.
+func rulesAhead(rules []netlink.Rule, prio int, restored uint32, ownsTable func(int) bool) []netlink.Rule {
+	var ahead []netlink.Rule
+	for _, r := range rules {
+		if r.Priority >= prio || ownsTable(r.Table) || r.Table == unix.RT_TABLE_LOCAL {
+			continue
+		}
+		bits := r.Mark
+		if r.Mask != nil {
+			bits = *r.Mask
+		}
+		if bits&restored != 0 || r.Src != nil || r.IifName != "" {
+			ahead = append(ahead, r)
+		}
+	}
+	slices.SortFunc(ahead, func(a, b netlink.Rule) int { return a.Priority - b.Priority })
+	return ahead
+}
+
+// describeRule names a rule as ip rule prints it.
+func describeRule(r *netlink.Rule) string {
+	sel := "from all"
+	if r.Src != nil {
+		sel = "from " + r.Src.String()
+	}
+	if r.Mark != 0 || r.Mask != nil {
+		sel += fmt.Sprintf(" fwmark %#x", r.Mark)
+		if r.Mask != nil {
+			sel += fmt.Sprintf("/%#x", *r.Mask)
+		}
+	}
+	if r.IifName != "" {
+		sel += " iif " + r.IifName
+	}
+	return fmt.Sprintf("rule %d (%s lookup %d)", r.Priority, sel, r.Table)
 }
 
 // The agent marks packets at mangle priority on the prerouting and output
@@ -60,12 +124,15 @@ const (
 // which outlives the packet, conflicts. A chain that no base chain jumps
 // to, for example one reached through a verdict map, counts as running
 // after. iptables-legacy rules are not visible here, nor IPv6 and bridge
-// tables, which never see the packets the agent steers.
-func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]markConflict, error) {
+// tables, which never see the packets the agent steers. It also returns the
+// packet mark bits that a rule outside the agent's table sets from the
+// connection mark, which every packet of a connection then carries.
+func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]markConflict, uint32, error) {
 	chains, err := c.ListChains()
 	if err != nil {
-		return nil, fmt.Errorf("list nftables chains: %w", err)
+		return nil, 0, fmt.Errorf("list nftables chains: %w", err)
 	}
+	var restored uint32
 	type key struct {
 		family nftables.TableFamily
 		table  string
@@ -93,11 +160,12 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 			continue // removed since it was listed
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list rules of chain %s in table %s: %w", ch.Name, ch.Table.Name, err)
+			return nil, 0, fmt.Errorf("list rules of chain %s in table %s: %w", ch.Name, ch.Table.Name, err)
 		}
 		cu := &chainUse{chain: ch}
 		for _, r := range rules {
 			u, jumps := markUse(r.Exprs)
+			restored |= u.Ct & u.MetaSet
 			cu.used.add(u)
 			cu.jumps = append(cu.jumps, jumps...)
 		}
@@ -142,7 +210,7 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 	}
 	rules, err := netlink.RuleList(unix.AF_INET)
 	if err != nil {
-		return nil, fmt.Errorf("list policy routing rules: %w", err)
+		return nil, 0, fmt.Errorf("list policy routing rules: %w", err)
 	}
 	for _, r := range rules {
 		if ownsTable(r.Table) || r.Mark == 0 && r.Mask == nil {
@@ -156,7 +224,7 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 			found = append(found, markConflict{Where: fmt.Sprintf("policy routing rule %d (fwmark %#x, table %d)", r.Priority, r.Mark, r.Table), Bits: markUsage{Meta: bits & mask}})
 		}
 	}
-	return found, nil
+	return found, restored, nil
 }
 
 // whenRuns places a base chain before or after the agent's marking: ingress

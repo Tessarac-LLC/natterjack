@@ -38,7 +38,7 @@ run() { # name, ip, env..., -- test args
 docker network create --subnet "$subnet" "$net" >/dev/null
 
 echo "--- one node"
-run "$net-gateway" "" -- -test.run 'TestSingleNodeGateway|TestStaleFlowsAreFlushed|TestMarkUse|TestMarkUseJumps|TestOwnRulesStayInTheMask|TestMarkConflicts'
+run "$net-gateway" "" -- -test.run 'TestSingleNodeGateway|TestStaleFlowsAreFlushed|TestMarkUse|TestMarkUseJumps|TestOwnRulesStayInTheMask|TestMarkConflicts|TestRulesAhead'
 docker rm "$net-gateway" >/dev/null
 
 echo "--- eBPF fast path"

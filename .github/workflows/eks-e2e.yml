@@ -1,0 +1,113 @@
+name: eks-e2e
+
+# Builds a throwaway EKS cluster with no NAT gateway from test/eks, runs
+# hack/eks-e2e.sh against it (install, failover, interface limits, broken
+# identity, IaC drift, attacks, throughput, uninstall) and destroys it.
+#
+# It runs as an AWS role that trusts only this repository's eks-e2e
+# environment, whose deployment-branch policy admits main alone: pull
+# requests never reach it. Every resource lives in us-east-2.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+  workflow_call:
+
+permissions: {}
+
+# A cancelled run would strand a cluster; runs queue instead.
+concurrency:
+  group: eks-e2e
+  cancel-in-progress: false
+
+env:
+  GOWORK: "off"
+  GOTOOLCHAIN: local
+  AWS_REGION: us-east-2
+
+jobs:
+  e2e:
+    name: eks-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 210
+    environment: eks-e2e
+    permissions:
+      contents: read
+      id-token: write # assume the e2e AWS role through GitHub OIDC
+    env:
+      TF_VAR_run_id: gh${{ github.run_id }}-${{ github.run_attempt }}
+      TF_VAR_permissions_boundary: ${{ vars.AWS_PERMISSIONS_BOUNDARY }}
+      OUT: ${{ github.workspace }}/out
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: natterjack-eks-e2e-${{ github.run_id }}
+          role-duration-seconds: 14400
+          aws-region: us-east-2
+
+      # The cluster's public API endpoint admits only this runner.
+      - name: Find this runner's address
+        run: |
+          ip="$(curl -fsS --retry 5 https://checkip.amazonaws.com | tr -d '[:space:]')"
+          [[ "$ip" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || { echo "unexpected address: $ip" >&2; exit 1; }
+          echo "TF_VAR_api_allowed_cidrs=[\"$ip/32\"]" >> "$GITHUB_ENV"
+
+      # State in the role's own bucket, so a run that dies can still be
+      # destroyed by the steps below or by hand.
+      - name: Keep state in S3
+        env:
+          STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+        run: |
+          cat > test/eks/backend_override.tf <<EOF
+          terraform {
+            backend "s3" {
+              bucket       = "$STATE_BUCKET"
+              key          = "runs/$TF_VAR_run_id.tfstate"
+              region       = "us-east-1"
+              encrypt      = true
+              use_lockfile = true
+            }
+          }
+          EOF
+          terraform -chdir=test/eks init -input=false
+
+      - name: Build the cluster
+        run: terraform -chdir=test/eks apply -input=false -auto-approve
+
+      - name: Run the suite
+        run: make eks-e2e
+
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: eks-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: ignore
+
+      - name: Destroy the cluster
+        if: always()
+        run: |
+          for attempt in 1 2 3; do
+            ./hack/eks-e2e-sweep.sh
+            terraform -chdir=test/eks destroy -input=false -auto-approve && exit 0
+            echo "destroy attempt $attempt failed; sweeping and retrying" >&2
+            sleep 60
+          done
+          exit 1

@@ -72,7 +72,7 @@ Kubernetes: `>=1.34.0-0`
 | `agent.resources` | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Agent container resources. A gateway node's forwarding happens in the kernel and is not counted here. |
 | `agent.resync` | string | `"30s"` | How often the data path is re-applied when nothing changes. |
 | `agent.routeTableBase` | int | `7700` | First policy routing table the agent owns. |
-| `agent.rulePriority` | int | `7700` | Priority of the agent's policy routing rules. |
+| `agent.rulePriority` | int | `1000` | Priority of the agent's policy routing rules; they use this and the next two. They must sort ahead of any rule that routes pod traffic by its source or by a mark carried on every packet of a connection, such as the AWS VPC CNI's (1024 and 1536). An agent that finds such a rule ahead of its own reports its node's data path not ready and names the rule. |
 | `agent.selfTest.interval` | string | `"30s"` | How often a gateway tests its slot. |
 | `agent.selfTest.url` | string | `"https://checkip.amazonaws.com"` | URL that answers with the caller's public IPv4 address. |
 | `agent.serviceAccount.name` | string | `""` | ServiceAccount name. Defaults to `<release>-agent`. |

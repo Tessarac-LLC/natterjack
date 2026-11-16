@@ -127,6 +127,7 @@ func run() error {
 	}
 
 	health := &controller.Health{}
+	hint := identityHint()
 	r := &controller.Reconciler{
 		Client:         mgr.GetClient(),
 		Provider:       awsprovider.New(ec2.NewFromConfig(awsCfg), *clusterName),
@@ -135,6 +136,7 @@ func run() error {
 		Namespace:      *namespace,
 		AgentSelector:  sel,
 		ServiceAccount: *serviceAccount,
+		IdentityHint:   hint,
 		Resync:         *resync,
 		Health:         health,
 		Now:            time.Now,
@@ -151,7 +153,41 @@ func run() error {
 	if err := mgr.AddReadyzCheck("cloud", health.Check); err != nil {
 		return fmt.Errorf("add readiness check: %w", err)
 	}
+	identity := &controller.IdentityWatch{
+		Retrieve: func(ctx context.Context) error {
+			if _, err := awsCfg.Credentials.Retrieve(ctx); err != nil {
+				if hint != "" {
+					return fmt.Errorf("%w (%s)", err, hint)
+				}
+				return fmt.Errorf("retrieve credentials: %w", err)
+			}
+			return nil
+		},
+		Every:         15 * time.Second,
+		StepDownAfter: 2 * time.Minute,
+		Elected:       mgr.Elected(),
+		Now:           time.Now,
+		Log:           ctrl.Log.WithName("identity"),
+	}
+	if err := mgr.Add(identity); err != nil {
+		return fmt.Errorf("add identity watch: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("identity", identity.Check); err != nil {
+		return fmt.Errorf("add identity readiness check: %w", err)
+	}
 	return start(ctx, mgr)
+}
+
+// identityHint explains a pod given no workload identity at all, which
+// happens to a pod created before its EKS Pod Identity association or IRSA
+// annotation: the credentials are injected when the pod is admitted.
+func identityHint() string {
+	for _, v := range []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ACCESS_KEY_ID"} {
+		if os.Getenv(v) != "" {
+			return ""
+		}
+	}
+	return "this pod has no workload identity: if the Pod Identity association or IRSA annotation was created after the pod, restart the controller with kubectl rollout restart"
 }
 
 func start(ctx context.Context, mgr ctrl.Manager) error {

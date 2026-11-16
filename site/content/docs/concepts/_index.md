@@ -8,8 +8,8 @@ description: Pools, slots, gateways and policies, and how traffic finds its way 
 
 An *egress slot* is a network interface your infrastructure-as-code created
 for Natterjack. On AWS it is an ENI in a public subnet with its own Elastic
-IP, the source/destination check turned off, and a security group with no
-inbound rules. It carries three tags:
+IP, the source/destination check turned off, and a security group that admits
+nothing from outside the VPC. It carries three tags:
 
 | Tag | Value |
 | --- | --- |
@@ -177,6 +177,15 @@ it. Those flows' next packets go to another live gateway in the zone, or to
 another zone when the zone has none left. Connections that were open through
 the lost gateway are reset by the remote end, because their public source
 address has changed. New connections and retries succeed at once.
+
+A gateway instance that is terminated can stop forwarding through its slot
+well before it stops answering probes, which keep arriving over its primary
+interface while the machine shuts down. The
+kubelet's graceful node shutdown marks the node not ready, with the message
+`node is shutting down`, as soon as the shutdown starts, and every agent
+stops sending new flows to a gateway on such a node from then on. Its open
+flows are left alone. Graceful node shutdown is on in the EKS Amazon Linux 2023 node images;
+where it is off, such a gateway is noticed when its probes stop.
 
 The slot itself is repaired in the background. When Kubernetes marks the
 failed node not ready, the controller detaches the slot and attaches it to
