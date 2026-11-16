@@ -85,6 +85,9 @@ type Instance struct {
 	Zone string            `json:"zone"`
 	Node string            `json:"node"`
 	Tags map[string]string `json:"tags"`
+	// MaxInterfaces, when set, is the instance type's interface limit,
+	// counting the primary interface.
+	MaxInterfaces int `json:"maxInterfaces,omitempty"`
 }
 
 // Links moves a slot's interface between the fake VPC and a node.
@@ -664,6 +667,20 @@ func (f *EC2) attach(q query) (any, error) {
 	for _, a := range f.attached {
 		if a.Instance == in.ID && a.Device == device {
 			return nil, invalid(fmt.Sprintf("Instance '%s' already has an interface attached at device index '%d'.", in.ID, device))
+		}
+	}
+	if in.MaxInterfaces > 0 {
+		count := 1
+		for _, a := range f.attached {
+			if a.Instance == in.ID {
+				count++
+			}
+		}
+		if count >= in.MaxInterfaces {
+			return nil, &apiError{
+				http.StatusBadRequest, "AttachmentLimitExceeded",
+				fmt.Sprintf("Interface count %d exceeds the limit for this instance type", count+1),
+			}
 		}
 	}
 	if err := f.links.Attach(s, in); err != nil {

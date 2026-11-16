@@ -468,10 +468,20 @@ func (p *Provider) Attach(ctx context.Context, slotID, instanceID string) error 
 		InstanceId:         aws.String(instanceID),
 		DeviceIndex:        aws.Int32(idx),
 	})
+	if isAttachmentLimit(err) {
+		return fmt.Errorf("attach %s to %s: %w: %w", slotID, instanceID, cloud.ErrNoFreeDeviceIndex, err)
+	}
 	if err != nil {
 		return fmt.Errorf("attach %s to %s: %w", slotID, instanceID, err)
 	}
 	return nil
+}
+
+// isAttachmentLimit reports whether EC2 refused an attach because the
+// instance already holds as many interfaces as its type allows.
+func isAttachmentLimit(err error) bool {
+	var api smithy.APIError
+	return errors.As(err, &api) && api.ErrorCode() == "AttachmentLimitExceeded"
 }
 
 // freeDeviceIndex returns the lowest unused device index above 0 on network card 0.
@@ -482,7 +492,8 @@ func freeDeviceIndex(inst *types.Instance) (int32, error) {
 			used[aws.ToInt32(a.DeviceIndex)] = true
 		}
 	}
-	// The per-type ENI limit is enforced by EC2; 64 is above every instance type.
+	// EC2 enforces the per-type interface limit (see isAttachmentLimit);
+	// 64 is above every instance type.
 	for i := int32(1); i < 64; i++ {
 		if !used[i] {
 			return i, nil

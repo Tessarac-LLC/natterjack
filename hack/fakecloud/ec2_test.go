@@ -86,6 +86,7 @@ func testConfig() Config {
 			{ID: "i-0000000000000001", Zone: "zone-a", Node: "worker", Tags: inCluster},
 			{ID: "i-0000000000000002", Zone: "zone-b", Node: "worker2", Tags: inCluster},
 			{ID: "i-0000000000000003", Zone: "zone-a", Node: "stranger"},
+			{ID: "i-0000000000000004", Zone: "zone-b", Node: "full", Tags: inCluster, MaxInterfaces: 1},
 		},
 	}
 }
@@ -194,6 +195,22 @@ func TestProviderAgainstFake(t *testing.T) {
 	want := []string{"attach eni-a1 worker", "detach eni-a1", "attach eni-a1 stranger"}
 	if !slices.Equal(links.got(), want) {
 		t.Errorf("links calls %q, want %q", links.got(), want)
+	}
+}
+
+// TestInterfaceLimit checks that an instance at its type's interface limit
+// refuses an attach with EC2's error, which the provider reads as no free slot.
+func TestInterfaceLimit(t *testing.T) {
+	p, links, _ := fakeProvider(t)
+	err := p.Attach(t.Context(), "eni-b1", "i-0000000000000004")
+	if !errors.Is(err, cloud.ErrNoFreeDeviceIndex) || !strings.Contains(err.Error(), "AttachmentLimitExceeded") {
+		t.Fatalf("attach to a full instance: %v", err)
+	}
+	if len(links.got()) != 0 {
+		t.Fatalf("a refused attach moved the interface: %q", links.got())
+	}
+	if err := p.Attach(t.Context(), "eni-b1", "i-0000000000000002"); err != nil {
+		t.Fatalf("attach to an instance with room: %v", err)
 	}
 }
 

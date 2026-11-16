@@ -48,6 +48,8 @@ type fakeEC2 struct {
 	detachPolls int
 	polls       int
 	vpcCalls    int
+	// attachErr, when set, is what AttachNetworkInterface returns.
+	attachErr error
 }
 
 func notFound(code string) error { return &smithy.GenericAPIError{Code: code, Message: "not found"} }
@@ -152,6 +154,9 @@ func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstances
 
 func (f *fakeEC2) AttachNetworkInterface(_ context.Context, in *ec2.AttachNetworkInterfaceInput, _ ...func(*ec2.Options)) (*ec2.AttachNetworkInterfaceOutput, error) {
 	f.attaches = append(f.attaches, *in)
+	if f.attachErr != nil {
+		return nil, f.attachErr
+	}
 	e := f.enis[aws.ToString(in.NetworkInterfaceId)]
 	e.Status = types.NetworkInterfaceStatusInUse
 	e.Attachment = &types.NetworkInterfaceAttachment{
@@ -464,6 +469,18 @@ func TestAttach(t *testing.T) {
 	}
 	if err := p.Attach(context.Background(), "eni-a", "i-0f"); !errors.Is(err, cloud.ErrAttachedElsewhere) {
 		t.Fatalf("want ErrAttachedElsewhere, got %v", err)
+	}
+}
+
+func TestAttachToAFullInstanceIsNoFreeSlot(t *testing.T) {
+	f := newFake(goodENI("eni-a", "us-east-2a"))
+	f.attachErr = &smithy.GenericAPIError{Code: "AttachmentLimitExceeded", Message: "Interface count 4 exceeds the limit for m7g.large"}
+	err := newProvider(f).Attach(context.Background(), "eni-a", "i-0a")
+	if !errors.Is(err, cloud.ErrNoFreeDeviceIndex) {
+		t.Fatalf("EC2's interface limit must read as no free slot, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "exceeds the limit for m7g.large") {
+		t.Fatalf("EC2's message must be kept: %v", err)
 	}
 }
 

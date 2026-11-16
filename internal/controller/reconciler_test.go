@@ -82,6 +82,8 @@ type fakeCloud struct {
 	slots    map[string]*cloud.Slot
 	detaches []string
 	failNext error
+	// full are instances that refuse every attach for lack of an interface slot.
+	full map[string]bool
 }
 
 var providerID = regexp.MustCompile(`^aws:///([a-z0-9-]+)/(i-[a-z0-9-]+)$`)
@@ -113,6 +115,9 @@ func (f *fakeCloud) InstanceForProviderID(id string) (cloud.Instance, error) {
 func (f *fakeCloud) Attach(_ context.Context, slot, instance string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.full[instance] {
+		return fmt.Errorf("attach %s to %s: %w: AttachmentLimitExceeded", slot, instance, cloud.ErrNoFreeDeviceIndex)
+	}
 	s := f.slots[slot]
 	s.Instance, s.InstanceInCluster = instance, true
 	return nil
@@ -316,6 +321,43 @@ func TestAttachReadyCordonDrainMove(t *testing.T) {
 	h.reconcile()
 	if h.cloud.instanceOf("eni-1") != "i-lc-2" || h.pod("agent-lc-2").Labels[v1.LabelGateway] != "true" {
 		t.Fatalf("slot not moved to lc-2: %q", h.cloud.instanceOf("eni-1"))
+	}
+}
+
+func TestFullNodeIsSkippedAndNamed(t *testing.T) {
+	h := newHarness(t, "full")
+	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "lifecycle"}})
+	h.node("full-1", "us-east-2a")
+	h.agent("full", "full-1")
+	h.cloud.full = map[string]bool{"i-full-1": true}
+	h.cloud.slots["eni-1"] = &cloud.Slot{ID: "eni-1", Zone: "us-east-2a", PublicIP: "203.0.113.1", MAC: "02:00:00:00:00:01", PrivateIP: "10.0.0.5", SubnetCIDR: "10.0.0.0/24", Tags: map[string]string{}}
+
+	// The only node refuses the attach; the error is returned for a retry.
+	if _, err := h.r.Reconcile(h.ctx, request); !errors.Is(err, cloud.ErrNoFreeDeviceIndex) {
+		t.Fatalf("want the attach failure, got %v", err)
+	}
+	if p := h.pod("agent-full-1"); p.Labels[v1.LabelGateway] != "" || p.Annotations[v1.AnnotationGateway] != "" {
+		t.Fatalf("a refused attach left the agent a gateway: %v %v", p.Labels, p.Annotations)
+	}
+
+	// The next pass skips the full node and says why.
+	h.reconcile()
+	if s := h.slotState(); s.State != v1.SlotUnschedulable || !strings.Contains(s.Reason, "full-1: no free network interface slot") {
+		t.Fatalf("status %+v", s)
+	}
+
+	// Another node in the zone takes the slot.
+	h.node("full-2", "us-east-2a")
+	h.agent("full", "full-2")
+	h.reconcile()
+	if h.cloud.instanceOf("eni-1") != "i-full-2" {
+		t.Fatalf("slot on %q, want i-full-2", h.cloud.instanceOf("eni-1"))
+	}
+
+	// Once the avoid window passes, the full node is a candidate again.
+	h.now = h.now.Add(avoidFor + time.Second)
+	if why := h.r.avoided(h.now)["full-1"]; why != "" {
+		t.Fatalf("still avoided: %q", why)
 	}
 }
 
