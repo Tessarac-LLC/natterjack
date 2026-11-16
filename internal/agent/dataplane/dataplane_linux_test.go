@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,14 +52,17 @@ func privileged(t *testing.T) {
 }
 
 const (
-	slotMAC   = "02:00:00:00:09:0a"
-	internet  = "203.0.113.1"
-	podIP     = "10.244.0.5"
-	slotIP    = "10.0.9.10"
-	routerIP  = "10.0.9.1"
-	echoPort  = 9000
-	poolName  = "p"
-	firstMark = 0x00010000
+	slotMAC  = "02:00:00:00:09:0a"
+	internet = "203.0.113.1"
+	podIP    = "10.244.0.5"
+	slotIP   = "10.0.9.10"
+	routerIP = "10.0.9.1"
+	// A node in another subnet, whose router is vpcRouterIP.
+	vpcNodeIP   = "10.0.20.5"
+	vpcRouterIP = "10.0.20.1"
+	echoPort    = 9000
+	poolName    = "p"
+	firstMark   = 0x00010000
 )
 
 // inNS runs fn on a thread inside ns.
@@ -177,6 +181,78 @@ func world(t *testing.T) (<-chan string, netns.NsHandle) {
 	}()
 	must(t, <-ready)
 	return seen, w
+}
+
+// vpcNode builds another node of the VPC behind the world's router, whose
+// subnet routes everything to the slot, as a bootstrap route does.
+func vpcNode(t *testing.T, w netns.NsHandle) netns.NsHandle {
+	t.Helper()
+	v := newNS(t)
+	inNS(t, w, func() error {
+		if err := netlink.LinkAdd(&netlink.Veth{
+			LinkAttrs: netlink.LinkAttrs{Name: "vpc0"}, PeerName: "eth0", PeerNamespace: netlink.NsFd(v),
+		}); err != nil {
+			return err
+		}
+		vpc, err := netlink.LinkByName("vpc0")
+		if err != nil {
+			return err
+		}
+		rtr, err := netlink.LinkByName("rtr0")
+		if err != nil {
+			return err
+		}
+		for _, step := range []func() error{
+			func() error { return netlink.AddrAdd(vpc, ipnet(vpcRouterIP+"/24")) },
+			func() error { return netlink.LinkSetUp(vpc) },
+			func() error {
+				return netlink.RouteAdd(&netlink.Route{Table: 100, Dst: defaultDst(), LinkIndex: rtr.Attrs().Index, Gw: net.ParseIP(slotIP)})
+			},
+			func() error {
+				rule := netlink.NewRule()
+				rule.Table, rule.IifName, rule.Priority, rule.Family = 100, "vpc0", 100, unix.AF_INET
+				rule.Dst = hostPrefix(netip.MustParseAddr(internet)) // not the router's own address
+				return netlink.RuleAdd(rule)
+			},
+			// The internet host lives here too: look up local addresses only
+			// after the subnet's route, or its flows never reach the slot.
+			func() error {
+				rule := netlink.NewRule()
+				rule.Table, rule.Priority, rule.Family = unix.RT_TABLE_LOCAL, 200, unix.AF_INET
+				return netlink.RuleAdd(rule)
+			},
+			func() error {
+				rule := netlink.NewRule()
+				rule.Table, rule.Priority, rule.Family = unix.RT_TABLE_LOCAL, 0, unix.AF_INET
+				return netlink.RuleDel(rule)
+			},
+			// Replies come back from the internet host's address, which this
+			// namespace also holds; a real VPC has them apart.
+			func() error { return writeSysctl("net/ipv4/conf/rtr0/accept_local", "1") },
+			func() error { return writeSysctl("net/ipv4/conf/all/rp_filter", "0") },
+			func() error { return writeSysctl("net/ipv4/conf/rtr0/rp_filter", "0") },
+			func() error { return writeSysctl("net/ipv4/ip_forward", "1") },
+		} {
+			if err := step(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	inNS(t, v, func() error {
+		eth, err := netlink.LinkByName("eth0")
+		if err != nil {
+			return err
+		}
+		if err := netlink.AddrAdd(eth, ipnet(vpcNodeIP+"/24")); err != nil {
+			return err
+		}
+		if err := netlink.LinkSetUp(eth); err != nil {
+			return err
+		}
+		return netlink.RouteAdd(&netlink.Route{LinkIndex: eth.Attrs().Index, Dst: defaultDst(), Gw: net.ParseIP(vpcRouterIP)})
+	})
+	return v
 }
 
 // pod builds a pod network namespace routed through the host.
@@ -314,6 +390,25 @@ func listenOnce(addr string, got chan<- string) error {
 	return nil
 }
 
+// nsDump describes a namespace's ruleset, policy routing and flows.
+func nsDump(t *testing.T, ns netns.NsHandle) string {
+	t.Helper()
+	var b strings.Builder
+	inNS(t, ns, func() error {
+		for _, c := range [][]string{{"nft", "list", "ruleset"}, {"ip", "rule"}, {"ip", "route", "show", "table", "all"}, {"ip", "-s", "link"}, {"cat", "/proc/net/netstat", "/proc/net/snmp"}} {
+			out, _ := exec.CommandContext(context.Background(), c[0], c[1:]...).CombinedOutput()
+			fmt.Fprintf(&b, "$ %s\n%s", strings.Join(c, " "), out)
+		}
+		flows, err := netlink.ConntrackTableList(netlink.ConntrackTable, netlink.FAMILY_V4)
+		fmt.Fprintf(&b, "conntrack (%v):\n", err)
+		for _, f := range flows {
+			fmt.Fprintf(&b, "  %s\n", f)
+		}
+		return nil
+	})
+	return b.String()
+}
+
 func nftDump() string {
 	out, _ := exec.CommandContext(context.Background(), "nft", "list", "ruleset").CombinedOutput()
 	return string(out)
@@ -408,6 +503,21 @@ func TestSingleNodeGateway(t *testing.T) {
 	if !probeOnce(t, cfg, firstMark) {
 		t.Fatal("probes went unanswered after the route came back")
 	}
+
+	// A node whose agent is not running reaches the internet through the
+	// bootstrap route: its subnet's default route names the slot.
+	v := vpcNode(t, w)
+	booting := *want
+	booting.Nodes = append(slices.Clone(want.Nodes), netip.MustParseAddr(vpcNodeIP))
+	_, err = dp.Apply(&booting)
+	must(t, err)
+	var routed string
+	inNS(t, v, func() error { routed = echo(t, seen); return nil })
+	if routed != slotIP {
+		t.Fatalf("a node on the bootstrap route reached the internet from %q, want %s\ngateway namespace:\n%s\nworld:\n%s", routed, slotIP, nsDump(t, dp.gw.ns), nsDump(t, w))
+	}
+	_, err = dp.Apply(want)
+	must(t, err)
 
 	// Nothing on the internet side reaches the node, its pods or the
 	// gateway namespace through the slot, even with a route pointing at it,

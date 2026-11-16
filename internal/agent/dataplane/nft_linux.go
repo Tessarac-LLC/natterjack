@@ -354,6 +354,10 @@ const (
 	prioMangle = -150
 	prioFilter = 0
 	prioSrcNAT = 100
+
+	// routedMark marks, in the gateway namespace only, flows a VPC route
+	// table sent to the slot.
+	routedMark = 0x1
 )
 
 // hostRuleset is the host namespace table: steering, the tunnel's source
@@ -506,6 +510,15 @@ func gatewayRuleset(c *nftables.Conn, d *agent.Desired, cfg Config) error {
 		return err
 	}
 	drop := nftables.ChainPolicyDrop
+
+	// Flows routed to the slot by a VPC route table come from addresses this
+	// namespace routes to the host. Their connection carries routedMark, which
+	// picks the slot's own table: the reverse-path check passes, and replies
+	// go back out the slot, not through the host, whose interface would drop
+	// a source that is not its own.
+	pre := r.base("prerouting", nftables.ChainTypeFilter, nftables.ChainHookPrerouting, prioMangle, nil)
+	r.rule(pre, ifIs(true, EgressLink, true), ctOriginal(), addrIn(true, private, true), setMarkBits(true, routedMark, routedMark))
+	r.rule(pre, markBits(true, routedMark, expr.CmpOpNeq), setMarkBits(false, routedMark, routedMark))
 
 	input := r.base("input", nftables.ChainTypeFilter, nftables.ChainHookInput, prioFilter, &drop)
 	r.rule(input, ctEstablished(), verdict(expr.VerdictAccept))

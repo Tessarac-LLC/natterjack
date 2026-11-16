@@ -699,8 +699,15 @@ func (d *Dataplane) configureSlot(nh *netlink.Handle, slot netlink.Link, want *a
 		return fmt.Errorf("set %s up: %w", EgressLink, err)
 	}
 	if err := d.gw.Do(func() error {
-		return writeSysctl("net/ipv4/conf/"+EgressLink+"/rp_filter", "1")
+		if err := writeSysctl("net/ipv4/conf/"+EgressLink+"/rp_filter", "1"); err != nil {
+			return err
+		}
+		// The reverse-path check honors routedMark (see gatewayRuleset).
+		return writeSysctl("net/ipv4/conf/"+EgressLink+"/src_valid_mark", "1")
 	}); err != nil {
+		return err
+	}
+	if err := d.routeRoutedFlows(nh, slot, g.Router); err != nil {
 		return err
 	}
 
@@ -732,6 +739,31 @@ func (d *Dataplane) configureSlot(nh *netlink.Handle, slot netlink.Link, want *a
 				return fmt.Errorf("remove stale gateway route %s: %w", dstString(r.Dst), err)
 			}
 		}
+	}
+	return nil
+}
+
+// routeRoutedFlows sends flows carrying routedMark, those a VPC route table
+// sent to the slot, back out the slot in both directions. The table and rule
+// live in the gateway namespace, so they take the agent's first table and
+// rule priority without meeting the host's.
+func (d *Dataplane) routeRoutedFlows(nh *netlink.Handle, slot netlink.Link, router netip.Addr) error {
+	r := netlink.Route{Table: d.cfg.TableBase, Dst: defaultDst(), LinkIndex: slot.Attrs().Index, Gw: net.IP(router.AsSlice())}
+	if err := nh.RouteReplace(&r); err != nil {
+		return fmt.Errorf("gateway route for routed flows: %w", err)
+	}
+	have, err := nh.RuleList(netlink.FAMILY_V4)
+	if err != nil {
+		return fmt.Errorf("list gateway rules: %w", err)
+	}
+	mask := uint32(routedMark)
+	want := netlink.NewRule()
+	want.Priority, want.Table, want.Mark, want.Mask, want.Family = d.cfg.RulePriority, d.cfg.TableBase, routedMark, &mask, unix.AF_INET
+	if slices.ContainsFunc(have, func(r netlink.Rule) bool { return ruleKey(&r) == ruleKey(want) }) {
+		return nil
+	}
+	if err := nh.RuleAdd(want); err != nil {
+		return fmt.Errorf("gateway rule for routed flows: %w", err)
 	}
 	return nil
 }
