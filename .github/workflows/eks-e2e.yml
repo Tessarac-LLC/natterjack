@@ -34,7 +34,7 @@ jobs:
     environment: eks-e2e
     permissions:
       contents: read
-      id-token: write
+      id-token: write # assume the e2e AWS role through GitHub OIDC
     env:
       TF_VAR_run_id: gh${{ github.run_id }}-${{ github.run_attempt }}
       TF_VAR_permissions_boundary: ${{ vars.AWS_PERMISSIONS_BOUNDARY }}
