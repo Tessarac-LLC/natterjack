@@ -151,7 +151,38 @@ func run() error {
 	if err := mgr.AddReadyzCheck("cloud", health.Check); err != nil {
 		return fmt.Errorf("add readiness check: %w", err)
 	}
+	identity := &controller.IdentityWatch{
+		Retrieve: func(ctx context.Context) error {
+			if _, err := awsCfg.Credentials.Retrieve(ctx); err != nil {
+				return credentialsError(err)
+			}
+			return nil
+		},
+		Every:         15 * time.Second,
+		StepDownAfter: 2 * time.Minute,
+		Elected:       mgr.Elected(),
+		Now:           time.Now,
+		Log:           ctrl.Log.WithName("identity"),
+	}
+	if err := mgr.Add(identity); err != nil {
+		return fmt.Errorf("add identity watch: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("identity", identity.Check); err != nil {
+		return fmt.Errorf("add identity readiness check: %w", err)
+	}
 	return start(ctx, mgr)
+}
+
+// credentialsError says when the pod was given no workload identity at all,
+// which happens to a pod created before its EKS Pod Identity association or
+// IRSA annotation: the credentials are injected when the pod is admitted.
+func credentialsError(err error) error {
+	for _, v := range []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ACCESS_KEY_ID"} {
+		if os.Getenv(v) != "" {
+			return err
+		}
+	}
+	return fmt.Errorf("%w (this pod has no workload identity: if the Pod Identity association or IRSA annotation was created after the pod, restart the controller with kubectl rollout restart)", err)
 }
 
 func start(ctx context.Context, mgr ctrl.Manager) error {

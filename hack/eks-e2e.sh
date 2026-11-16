@@ -551,11 +551,34 @@ why="$(kubectl get egresspool default -o jsonpath='{.status.conditions[?(@.type=
 record "identity broken: CloudAccess False: $why"
 node_steered steered-a "${zones[0]}" || fail "traffic stopped while the controller had no cloud access"
 tf_apply
-kubectl -n "$ns" rollout restart "deploy/$deploy" >/dev/null
+# EKS injects credentials when a pod is admitted, and a new association
+# takes a moment to reach the admission webhook: restart until every
+# controller pod was given them, as the troubleshooting guide says.
+injected() {
+	local pods
+	kubectl -n "$ns" rollout status "deploy/$deploy" --timeout=60s >/dev/null || return 1
+	pods="$(kubectl -n "$ns" get pods -l app.kubernetes.io/component=controller --field-selector status.phase=Running \
+		-o jsonpath='{range .items[*]}{.metadata.name} {.spec.containers[0].env[*].name}{"\n"}{end}')" || return 1
+	[[ -n "$pods" ]] || return 1
+	while read -r line; do
+		[[ -z "$line" || "$line" == *AWS_CONTAINER_CREDENTIALS_FULL_URI* ]] || return 1
+	done <<<"$pods"
+}
+restarts=0
+until injected; do
+	((++restarts <= 5)) || fail "controller pods never received Pod Identity credentials"
+	kubectl -n "$ns" rollout restart "deploy/$deploy" >/dev/null
+	sleep 10
+done
 allowed() { [[ "$(cloud_access)" == True ]]; }
 eventually 300 "CloudAccess true once restored" allowed
 eventually 300 "every slot active" all_active
-record "identity restored: CloudAccess True"
+replicas_ready() {
+	[[ "$(kubectl -n "$ns" get "deploy/$deploy" -o jsonpath='{.status.readyReplicas}')" == \
+		"$(kubectl -n "$ns" get "deploy/$deploy" -o jsonpath='{.spec.replicas}')" ]]
+}
+eventually 120 "every controller replica ready, credentials included" replicas_ready
+record "identity restored: CloudAccess True after $restarts restart(s); every controller replica ready"
 
 step "Terraform sees no drift"
 set +e

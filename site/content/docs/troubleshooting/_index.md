@@ -85,6 +85,23 @@ Check, in order:
 3. **The region.** `controller.aws.region` must be the cluster's region.
 4. **The network.** In a VPC without a NAT gateway, the controller reaches
    EC2 and STS through the bootstrap route or VPC endpoints.
+5. **The pod's credentials.** EKS gives a pod its credentials when the pod
+   is created. A controller pod created before its Pod Identity association
+   or IRSA annotation has none, and restarting its container does not help.
+   Its readiness check reports `no cloud credentials`, and the error ends
+   with `this pod has no workload identity`. Recreate the pods:
+
+   ```sh
+   kubectl -n natterjack rollout restart deploy/natterjack-controller
+   ```
+
+   A new association can take a few seconds to apply to new pods; if a pod
+   still reports no workload identity, restart again.
+
+Every controller replica checks its own credentials every 15 seconds, and a
+replica without them is not ready. A leader that has had none for two
+minutes gives up leadership, so a replica that has them takes over; the
+leader's container restarts, which shows in its restart count.
 
 The condition clears by itself once a call succeeds; restart the controller
 to retry at once.
