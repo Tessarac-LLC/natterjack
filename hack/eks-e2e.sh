@@ -16,6 +16,8 @@
 #      once it has room;
 #   7. terminating a gateway instance moves new flows to the zone's other
 #      gateway within the probe window, then moves its slot (both timed);
+#      rebooting one does the same, and the VPC CNI leaves every slot
+#      interface unmanaged across the reboot;
 #   8. a deleted slot drops out of the pool, and comes back when Terraform
 #      recreates it;
 #   9. a broken workload identity is reported as CloudAccess with the
@@ -79,7 +81,12 @@ eventually() {
 record() { printf '%s\n' "$*" | tee -a "$OUT/results.txt"; }
 
 outputs="$(terraform -chdir="$tf" output -json)"
-out() { jq -r ".$1.value" <<<"$outputs"; }
+# out NAME[.FIELD]: an output, or a field of an object output; fails on null.
+out() {
+	local path=".${1%%.*}.value"
+	[[ "$1" == *.* ]] && path+=".${1#*.}"
+	jq -er "$path" <<<"$outputs" || fail "no output $1"
+}
 cluster="$(out cluster_name)"
 region="$(out region)"
 registry="$(out registry)"
@@ -200,7 +207,16 @@ http() { kubectl -n e2e exec "$1" -- curl -fsS --max-time "${3:-5}" "http://$out
 kubectl create namespace e2e >/dev/null
 host_pod probe-a "$src_a"
 kubectl -n e2e wait pod/probe-a --for=condition=Ready --timeout=300s >/dev/null || fail "a pod could not start from the run's ECR"
-if http probe-a "" 5; then fail "a node reached the internet before Natterjack ran"; fi
+# The target answers (checked on itself), so a failure from the node is the
+# network's: curl must time out (28) or be refused (7), not fail otherwise.
+[[ "$(ssm "$outside_id" "curl -fsS --max-time 5 http://127.0.0.1/")" == 127.0.0.1 ]] || fail "the outside server does not answer"
+rc=0
+http probe-a "" 5 >/dev/null 2>&1 || rc=$?
+case "$rc" in
+0) fail "a node reached the internet before Natterjack ran" ;;
+7 | 28) ;;
+*) fail "the pre-install check failed for another reason (curl exit $rc)" ;;
+esac
 record "before install: nodes joined and pulled from ECR through VPC endpoints; the internet was unreachable"
 
 step "install"
@@ -432,6 +448,42 @@ flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${z
 record "failover: longest run of failed new connections ${gap}ms; $id active on $(slot "$id" node) after ${moved_after}s"
 eventually 900 "the node group replaces the terminated node" nodes_ready
 label_gateways
+
+step "gateway node rebooted"
+# The VPC CNI manages every interface on a node that is not tagged no_manage.
+# Across a reboot it must leave the slots alone: a slot it managed would get
+# secondary addresses for pods, and its Elastic IP would leave from them.
+slot_enis() { jq -r '.slots.value[].network_interface_id' <<<"$outputs"; }
+unmanaged() {
+	local eni
+	for eni in $(slot_enis); do
+		[[ "$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" \
+			--query 'length(NetworkInterfaces[0].PrivateIpAddresses)' --output text)" == 1 ]] || return 1
+	done
+}
+gw="$(gw_in "${zones[0]}")"
+id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw\")].id}")"
+watch_flows "${zones[0]}" steered-a 600 &
+watch=$!
+sleep 5
+start=$(date +%s)
+aws ec2 reboot-instances --instance-ids "$(node_instance "$gw")" >/dev/null
+node_down() { [[ "$(kubectl get node "$gw" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" != True ]]; }
+eventually 300 "$gw goes down" node_down
+node_up() { ! node_down; }
+eventually 600 "$gw comes back" node_up
+up_after=$(($(date +%s) - start))
+kubectl -n "$ns" rollout status "ds/$ds" --timeout=300s >/dev/null || fail "the agent on $gw did not come back"
+eventually 300 "every slot active after the reboot" all_active
+for n in $(gateways); do eventually 120 "$n passes its self-test" gw_ready "$n"; done
+sleep 10
+kill "$watch" 2>/dev/null || true
+wait "$watch" 2>/dev/null || true
+gap="$(flow_gap steered-a)"
+((gap <= 3000)) || fail "new connections failed for ${gap}ms after $gw rebooted"
+flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after $gw rebooted"
+unmanaged || fail "the VPC CNI added addresses to a slot interface after the reboot"
+record "reboot: $gw back after ${up_after}s; $id on $(slot "$id" node); longest run of failed new connections ${gap}ms; no slot interface gained a secondary address"
 
 step "slot deleted"
 id="$(jq -r --arg z "${zones[1]}" '.slots.value[$z + "/1"].network_interface_id' <<<"$outputs")"
