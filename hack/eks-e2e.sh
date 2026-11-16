@@ -646,7 +646,9 @@ record "attack, Warn: full TCP and node UDP scans of every Elastic IP found noth
 # node, a pod and the kubelet sent to the slot's address, and packets with
 # spoofed sources (a node, a pod, the slot itself) through it to the
 # internet. "outside" captures what reaches it.
-cap="$(ssm_start "$outside_id" "timeout 90 tcpdump -n -i any -c 50 'not port 22 and not net 169.254.0.0/16 and (src host $(tr '\n' ' ' <<<"$all_ips" | sed 's/ $//; s/ / or src host /g'))' 2>/dev/null; true")"
+# Only what the attack sends counts: other steps' test traffic from the
+# slots goes to port 80 and may still be finishing.
+cap="$(ssm_start "$outside_id" "timeout 90 tcpdump -n -i any -c 50 '(icmp or tcp dst port 7 or udp dst port 5201) and (src host $(tr '\n' ' ' <<<"$all_ips" | sed 's/ $//; s/ / or src host /g'))' 2>/dev/null; true")"
 sleep 10
 attack="$(ssm "$attacker_id" "set -x
 ip route replace $target_ip/32 via $slot_private
@@ -661,7 +663,7 @@ slot = '$slot_private'
 mac = getmacbyip(slot)
 # Sources outside the cluster's, the VPC's and the pods' ranges.
 for src in ['203.0.113.7', '192.168.77.7', '100.64.9.9', '8.8.8.8']:
-    for pkt in [IP(src=src, dst='$outside_ip')/ICMP(), IP(src=src, dst='$outside_ip')/TCP(dport=80, flags='S'),
+    for pkt in [IP(src=src, dst='$outside_ip')/ICMP(), IP(src=src, dst='$outside_ip')/TCP(dport=7, flags='S'),
                 IP(src=src, dst='$outside_ip')/UDP(dport=5201)]:
         sendp(Ether(dst=mac)/pkt, iface=conf.iface, count=5, verbose=False)
 print('sent spoofed packets via', slot, mac)
