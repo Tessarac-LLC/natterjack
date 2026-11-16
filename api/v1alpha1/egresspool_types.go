@@ -235,7 +235,7 @@ type EgressPoolStatus struct {
 	// +listMapKey=id
 	Slots []SlotStatus `json:"slots,omitempty"`
 	// Conditions: Ready, Degraded, CrossZoneEgress, SlotsQuarantined,
-	// SlotsUnschedulable, ForeignSlots.
+	// SlotsUnschedulable, ForeignSlots, CloudAccess.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
