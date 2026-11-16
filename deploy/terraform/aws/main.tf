@@ -1,5 +1,5 @@
 data "aws_subnet" "slot" {
-  for_each = toset(var.slot_subnet_ids)
+  for_each = var.slot_subnets
   id       = each.value
 }
 
@@ -7,8 +7,8 @@ locals {
   vpc_ids = distinct([for s in data.aws_subnet.slot : s.vpc_id])
 
   slots = {
-    for pair in setproduct(var.slot_subnet_ids, range(var.slots_per_subnet)) :
-    "${pair[0]}/${pair[1]}" => { subnet_id = pair[0], index = pair[1] }
+    for pair in setproduct(keys(var.slot_subnets), range(var.slots_per_subnet)) :
+    "${pair[0]}/${pair[1]}" => { zone = pair[0], subnet_id = var.slot_subnets[pair[0]], index = pair[1] }
   }
 
   # Tags the controller and the VPC CNI read. Applied last so callers cannot
@@ -20,13 +20,6 @@ locals {
   }
 
   oidc_issuer = var.oidc_provider_arn == null ? "" : replace(var.oidc_provider_arn, "/^.*oidc-provider\\//", "")
-}
-
-check "one_subnet_per_zone" {
-  assert {
-    condition     = length(distinct([for s in data.aws_subnet.slot : s.availability_zone])) == length(var.slot_subnet_ids)
-    error_message = "Give at most one slot subnet per zone."
-  }
 }
 
 # --- Slots -------------------------------------------------------------------
@@ -68,6 +61,13 @@ resource "aws_network_interface" "slot" {
   # fight it.
   lifecycle {
     ignore_changes = [attachment]
+
+    # Keying by zone keeps it to one subnet per zone, as long as the key is
+    # the subnet's own zone.
+    precondition {
+      condition     = contains([data.aws_subnet.slot[each.value.zone].availability_zone, data.aws_subnet.slot[each.value.zone].availability_zone_id], each.value.zone)
+      error_message = "slot_subnets key ${each.value.zone} is not the zone of subnet ${each.value.subnet_id}."
+    }
   }
 }
 
@@ -93,13 +93,6 @@ resource "aws_route" "bootstrap" {
   route_table_id         = each.value
   destination_cidr_block = "0.0.0.0/0"
   network_interface_id   = aws_network_interface.slot["${each.key}/0"].id
-
-  lifecycle {
-    precondition {
-      condition     = contains(var.slot_subnet_ids, each.key)
-      error_message = "bootstrap_route_table_ids keys must be slot subnet IDs."
-    }
-  }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "tunnel" {

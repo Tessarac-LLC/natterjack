@@ -25,13 +25,16 @@ module "natterjack" {
   source = "github.com/Tessarac-LLC/natterjack//deploy/terraform/aws?ref=v1.0.0"
 
   cluster_name           = "prod-east"
-  slot_subnet_ids        = module.vpc.public_subnets
+  slot_subnets           = zipmap(module.vpc.azs, module.vpc.public_subnets)
   node_security_group_id = module.eks.node_security_group_id
 
   # Optional: replace the NAT gateway's default route in each zone.
-  bootstrap_route_table_ids = zipmap(module.vpc.public_subnets, module.vpc.private_route_table_ids)
+  bootstrap_route_table_ids = zipmap(module.vpc.azs, module.vpc.private_route_table_ids)
 }
 ```
+
+Both maps are keyed by zone name. Terraform needs the keys when it plans, and
+subnets created in the same apply have no ID until then.
 
 Then install the chart with the same cluster name:
 
@@ -98,8 +101,8 @@ No modules.
 | Name | Description | Type | Default | Required |
 | ---- | ----------- | ---- | ------- | :------: |
 | cluster\_name | Kubernetes cluster name. The same value as the chart's clusterName; slots are tagged with it and IAM is scoped to it. | `string` | n/a | yes |
-| slot\_subnet\_ids | Public subnets to create slots in, at most one per zone. Each must route 0.0.0.0/0 to an internet gateway. Slot ENIs can only attach to nodes in the same zone. | `list(string)` | n/a | yes |
-| bootstrap\_route\_table\_ids | Private route tables, keyed by the slot subnet ID in the same zone, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route. | `map(string)` | `{}` | no |
+| slot\_subnets | Public subnets to create slots in, keyed by zone name, at most one per zone. Each must route 0.0.0.0/0 to an internet gateway. Slot ENIs can only attach to nodes in the same zone. The keys must be known when Terraform plans, so use zone names rather than subnet IDs: subnets created in the same apply have no ID yet. | `map(string)` | n/a | yes |
+| bootstrap\_route\_table\_ids | Private route tables, keyed by zone name as in slot\_subnets, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route. | `map(string)` | `{}` | no |
 | identity | How the controller gets AWS credentials: "pod-identity" (EKS Pod Identity; the eks-pod-identity-agent add-on must be installed) or "irsa" (IAM roles for service accounts). | `string` | `"pod-identity"` | no |
 | namespace | Namespace the chart is installed in. | `string` | `"natterjack"` | no |
 | node\_security\_group\_id | Security group shared by the cluster's nodes. The module allows the agent tunnel (UDP) between members of this group. Null to manage the rule yourself. | `string` | `null` | no |

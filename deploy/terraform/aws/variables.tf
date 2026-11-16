@@ -8,12 +8,12 @@ variable "cluster_name" {
   }
 }
 
-variable "slot_subnet_ids" {
-  description = "Public subnets to create slots in, at most one per zone. Each must route 0.0.0.0/0 to an internet gateway. Slot ENIs can only attach to nodes in the same zone."
-  type        = list(string)
+variable "slot_subnets" {
+  description = "Public subnets to create slots in, keyed by zone name, at most one per zone. Each must route 0.0.0.0/0 to an internet gateway. Slot ENIs can only attach to nodes in the same zone. The keys must be known when Terraform plans, so use zone names rather than subnet IDs: subnets created in the same apply have no ID yet."
+  type        = map(string)
 
   validation {
-    condition     = length(var.slot_subnet_ids) > 0
+    condition     = length(var.slot_subnets) > 0
     error_message = "Give at least one public subnet."
   }
 }
@@ -30,9 +30,14 @@ variable "slots_per_subnet" {
 }
 
 variable "bootstrap_route_table_ids" {
-  description = "Private route tables, keyed by the slot subnet ID in the same zone, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route."
+  description = "Private route tables, keyed by zone name as in slot_subnets, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route."
   type        = map(string)
   default     = {}
+
+  validation {
+    condition     = alltrue([for z in keys(var.bootstrap_route_table_ids) : contains(keys(var.slot_subnets), z)])
+    error_message = "Every bootstrap_route_table_ids key must also be a slot_subnets key."
+  }
 }
 
 variable "node_security_group_id" {
