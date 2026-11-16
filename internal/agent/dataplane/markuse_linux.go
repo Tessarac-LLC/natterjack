@@ -27,7 +27,7 @@ func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 	if time.Since(d.marksChecked) < markScanEvery {
 		return d.marksErr
 	}
-	found, err := markConflicts(c, d.cfg.MarkMask, d.ownsTable)
+	found, restored, err := markConflicts(c, d.cfg.MarkMask, d.ownsTable)
 	if err != nil {
 		return err
 	}
@@ -35,7 +35,7 @@ func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 	if err != nil {
 		return fmt.Errorf("list policy routing rules: %w", err)
 	}
-	ahead := rulesAhead(rules, d.cfg.RulePriority, d.ownsTable)
+	ahead := rulesAhead(rules, d.cfg.RulePriority, restored, d.ownsTable)
 	d.marksChecked, d.marksErr = time.Now(), nil
 	var errs []error
 	if len(found) > 0 {
@@ -59,19 +59,27 @@ func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 }
 
 // rulesAhead lists the policy routing rules that sort ahead of the agent's
-// and choose a route by a packet's mark, source or incoming interface. A
+// and choose a route by a packet's source or incoming interface, or by mark
+// bits that other rules restore from the connection mark (restored). A
 // steered packet that one of them matches never reaches the agent's rules:
-// the AWS VPC CNI, for example, marks every outbound pod connection 0x80
-// and sends such packets to the main table at priority 1024. Rules that
-// only match a destination are left out, since steered destinations are
-// public, as is the lookup of the local table.
-func rulesAhead(rules []netlink.Rule, prio int, ownsTable func(int) bool) []netlink.Rule {
+// the AWS VPC CNI, for example, gives every outbound pod connection
+// connection mark 0x80, restores it onto each packet and sends such packets
+// to the main table at priority 1024. A mark set on a packet alone, as
+// Cilium sets 0x200 on packets for its proxy, belongs to traffic that
+// component handles, and rules that only match a destination never match
+// steered traffic, which is bound for the internet. The lookup of the local
+// table is left out too.
+func rulesAhead(rules []netlink.Rule, prio int, restored uint32, ownsTable func(int) bool) []netlink.Rule {
 	var ahead []netlink.Rule
 	for _, r := range rules {
 		if r.Priority >= prio || ownsTable(r.Table) || r.Table == unix.RT_TABLE_LOCAL {
 			continue
 		}
-		if r.Mark != 0 || r.Mask != nil || r.Src != nil || r.IifName != "" {
+		bits := r.Mark
+		if r.Mask != nil {
+			bits = *r.Mask
+		}
+		if bits&restored != 0 || r.Src != nil || r.IifName != "" {
 			ahead = append(ahead, r)
 		}
 	}
@@ -116,12 +124,15 @@ const (
 // which outlives the packet, conflicts. A chain that no base chain jumps
 // to, for example one reached through a verdict map, counts as running
 // after. iptables-legacy rules are not visible here, nor IPv6 and bridge
-// tables, which never see the packets the agent steers.
-func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]markConflict, error) {
+// tables, which never see the packets the agent steers. It also returns the
+// packet mark bits that a rule outside the agent's table sets from the
+// connection mark, which every packet of a connection then carries.
+func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]markConflict, uint32, error) {
 	chains, err := c.ListChains()
 	if err != nil {
-		return nil, fmt.Errorf("list nftables chains: %w", err)
+		return nil, 0, fmt.Errorf("list nftables chains: %w", err)
 	}
+	var restored uint32
 	type key struct {
 		family nftables.TableFamily
 		table  string
@@ -149,11 +160,12 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 			continue // removed since it was listed
 		}
 		if err != nil {
-			return nil, fmt.Errorf("list rules of chain %s in table %s: %w", ch.Name, ch.Table.Name, err)
+			return nil, 0, fmt.Errorf("list rules of chain %s in table %s: %w", ch.Name, ch.Table.Name, err)
 		}
 		cu := &chainUse{chain: ch}
 		for _, r := range rules {
 			u, jumps := markUse(r.Exprs)
+			restored |= u.Ct & u.MetaSet
 			cu.used.add(u)
 			cu.jumps = append(cu.jumps, jumps...)
 		}
@@ -198,7 +210,7 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 	}
 	rules, err := netlink.RuleList(unix.AF_INET)
 	if err != nil {
-		return nil, fmt.Errorf("list policy routing rules: %w", err)
+		return nil, 0, fmt.Errorf("list policy routing rules: %w", err)
 	}
 	for _, r := range rules {
 		if ownsTable(r.Table) || r.Mark == 0 && r.Mask == nil {
@@ -212,7 +224,7 @@ func markConflicts(c *nftables.Conn, mask uint32, ownsTable func(int) bool) ([]m
 			found = append(found, markConflict{Where: fmt.Sprintf("policy routing rule %d (fwmark %#x, table %d)", r.Priority, r.Mark, r.Table), Bits: markUsage{Meta: bits & mask}})
 		}
 	}
-	return found, nil
+	return found, restored, nil
 }
 
 // whenRuns places a base chain before or after the agent's marking: ingress
