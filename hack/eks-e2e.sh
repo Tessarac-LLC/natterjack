@@ -54,7 +54,25 @@ netshoot=docker.io/nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da252
 # Pulled from Docker Hub by a node once Natterjack runs.
 pullable=docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
 
-cleanup() { rm -rf "$work"; }
+# What a failed step leaves behind is undone on exit, so the cluster can
+# run the suite again: filler interfaces and cordoned nodes.
+fillers=()
+cordoned=()
+cleanup() {
+	local eni att node
+	for eni in "${fillers[@]}"; do
+		att="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)" || continue
+		[[ "$att" == None ]] || aws ec2 detach-network-interface --attachment-id "$att" --force >/dev/null 2>&1 || true
+	done
+	for eni in "${fillers[@]}"; do
+		aws ec2 wait network-interface-available --network-interface-ids "$eni" 2>/dev/null &&
+			aws ec2 delete-network-interface --network-interface-id "$eni" 2>/dev/null || true
+	done
+	for node in "${cordoned[@]}"; do
+		kubectl uncordon "$node" >/dev/null 2>&1 || true
+	done
+	rm -rf "$work"
+}
 trap cleanup EXIT
 
 step() { printf '\n== %s (%s)\n' "$*" "$(date -u +%H:%M:%S)"; }
@@ -368,6 +386,7 @@ id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw
 watch_flows "${zones[0]}" steered-a 300 &
 watch=$!
 start=$(date +%s)
+cordoned+=("$gw")
 kubectl drain "$gw" --ignore-daemonsets --delete-emptydir-data --timeout=300s >/dev/null || fail "drain of $gw failed"
 seen_draining() { [[ "$(slot "$id" state)" == Draining ]]; }
 eventually 30 "$id drains" seen_draining
@@ -396,7 +415,6 @@ max="$(aws ec2 describe-instance-types --instance-types "$(kubectl get node "$sp
 	--query 'InstanceTypes[0].NetworkInfo.MaximumNetworkInterfaces' --output text)"
 used="$(aws ec2 describe-instances --instance-ids "$spare_instance" --query 'length(Reservations[0].Instances[0].NetworkInterfaces)' --output text)"
 subnet="$(aws ec2 describe-instances --instance-ids "$spare_instance" --query 'Reservations[0].Instances[0].SubnetId' --output text)"
-fillers=()
 for _ in $(seq $((used + 1)) "$max"); do
 	eni="$(aws ec2 create-network-interface --subnet-id "$subnet" --description "natterjack e2e filler" \
 		--tag-specifications "ResourceType=network-interface,Tags=[{Key=natterjack.io/e2e,Value=$TF_VAR_run_id},{Key=node.k8s.amazonaws.com/no_manage,Value=true}]" \
@@ -409,6 +427,7 @@ for _ in $(seq $((used + 1)) "$max"); do
 	done
 done
 echo "$spare holds $max of $max interfaces"
+cordoned+=("$gw")
 kubectl drain "$gw" --ignore-daemonsets --delete-emptydir-data --timeout=300s >/dev/null || fail "drain of $gw failed"
 refused() { [[ "$(slot "$id" state)" == Unschedulable ]] && grep -qi "$spare" <<<"$(slot "$id" reason)"; }
 eventually 300 "$id is unschedulable, naming the full node $spare" refused
@@ -422,8 +441,11 @@ for eni in "${fillers[@]}"; do
 	aws ec2 wait network-interface-available --network-interface-ids "$eni"
 	aws ec2 delete-network-interface --network-interface-id "$eni"
 done
+fillers=()
+# The controller avoids a node that refused an attach for ten minutes, then
+# tries it again on a later sync.
 on_spare() { [[ "$(slot "$id" state)" == Active && "$(slot "$id" node)" == "$spare" ]]; }
-eventually 300 "$id moves to $spare once it has room" on_spare
+eventually 720 "$id moves to $spare once it has room" on_spare
 kubectl uncordon "$gw" >/dev/null
 record "interface limit: once freed, $id attached to $spare"
 
