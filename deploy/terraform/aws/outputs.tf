@@ -9,14 +9,14 @@ output "slots" {
     for k, eni in aws_network_interface.slot : k => {
       network_interface_id = eni.id
       availability_zone    = data.aws_subnet.slot[split("/", k)[0]].availability_zone
-      public_ip            = aws_eip.slot[k].public_ip
+      public_ip            = local.slot_eips[k].public_ip
     }
   }
 }
 
 output "public_ips" {
   description = "The addresses the cluster's selected traffic leaves from. Give these to anyone who allow-lists your egress."
-  value       = sort([for e in aws_eip.slot : e.public_ip])
+  value       = sort([for e in local.slot_eips : e.public_ip])
 }
 
 output "slot_security_group_id" {

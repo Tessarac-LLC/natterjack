@@ -49,7 +49,10 @@ IRSA, also set
 `controller.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"` to the
 `controller_role_arn` output.
 
-`public_ips` lists the addresses selected traffic leaves from.
+`public_ips` lists the addresses selected traffic leaves from. To keep
+addresses that destinations already allow-list, such as a NAT gateway's, pass
+their allocation IDs in `slot_eip_allocation_ids`, keyed by slot as
+`"us-east-1a/0"`; see [Moving off a NAT gateway](https://natterjack.io/docs/migrate/).
 
 ## Keeping Terraform and the controller apart
 
@@ -99,6 +102,7 @@ No modules.
 | [aws_vpc_security_group_ingress_rule.slot_routed](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.tunnel](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
 | [aws_vpc_security_group_ingress_rule.wireguard](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_security_group_ingress_rule) | resource |
+| [aws_eip.adopted](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/eip) | data source |
 | [aws_subnet.slot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/subnet) | data source |
 | [aws_vpc.slot](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/data-sources/vpc) | data source |
 
@@ -116,6 +120,7 @@ No modules.
 | oidc\_provider\_arn | ARN of the cluster's IAM OIDC provider. Required when identity is "irsa". | `string` | `null` | no |
 | permissions\_boundary | ARN of a permissions boundary for the controller's IAM role, for accounts that require one on every role. Null for none. | `string` | `null` | no |
 | service\_account | The controller's ServiceAccount name. The chart default is `<release>-controller`, so `natterjack-controller` for a release named natterjack. | `string` | `"natterjack-controller"` | no |
+| slot\_eip\_allocation\_ids | Existing Elastic IP allocations to give slots instead of new ones, keyed by slot as zone/index ("us-east-1a/0" is the zone's first slot). Use it to keep addresses others allow-list, such as a NAT gateway's after deleting the gateway. Terraform never releases an adopted address. | `map(string)` | `{}` | no |
 | slots\_per\_subnet | Slots (ENI with an Elastic IP) per subnet. Two give a zone a warm replacement: the controller fails over by moving an attached slot or using a spare. | `number` | `2` | no |
 | tags | Tags added to every resource the module creates. Cannot override the natterjack.io and no\_manage tags. | `map(string)` | `{}` | no |
 | tunnel\_port | UDP port of the agent tunnel. Must match the chart's agent.tunnelPort. | `number` | `6081` | no |

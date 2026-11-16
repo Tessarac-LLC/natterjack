@@ -40,3 +40,5 @@ jobs:
           terraform_wrapper: false
       - name: Format, validate, test and document the modules
         run: make terraform-check
+      - name: Lint the CloudFormation templates
+        run: make cfn-check

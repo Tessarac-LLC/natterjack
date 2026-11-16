@@ -12,6 +12,7 @@ KUBECONFORM_VERSION := v0.8.0
 KIND_VERSION := v0.33.0
 KO_VERSION := v0.19.1
 HELM_DOCS_VERSION := v1.14.2
+CFN_LINT_VERSION := 1.60.1
 CRANE_VERSION := v0.22.1
 # The CNIs the data-path end-to-end test runs under, besides kindnet.
 CILIUM_VERSION := 1.20.4
@@ -82,8 +83,10 @@ chart-lint: chart-tools ## Lint the chart, validate every rendering, check bad i
 	PATH="$(CHART_PATH)" ./hack/chart-lint.sh
 
 .PHONY: chart-docs
-chart-docs: chart-tools ## Regenerate the chart README's values reference
+chart-docs: chart-tools ## Regenerate the chart README's and the site's values reference
 	$(HELM_DOCS) --chart-search-root charts --template-files README.md.gotmpl
+	$(HELM_DOCS) --chart-search-root charts --template-files $(CURDIR)/site/helm-values.md.gotmpl \
+		--output-file ../../site/content/docs/reference/helm-values/_index.md
 
 .PHONY: chart-e2e
 chart-e2e: chart-tools ## Install the chart on a throwaway kind cluster and prove it (needs Docker)
@@ -144,6 +147,10 @@ terraform-check: $(TERRAFORM_DOCS) ## Format, validate, test and document the Te
 		$(TERRAFORM_DOCS) $$m >/dev/null; \
 	done
 	git diff --exit-code -- $(addsuffix /README.md,$(TF_MODULES)) || { echo "A module README is stale: run 'make terraform-check' and commit"; exit 1; }
+
+.PHONY: cfn-check
+cfn-check: ## Lint the CloudFormation templates
+	pipx run --spec cfn-lint==$(CFN_LINT_VERSION) cfn-lint deploy/cloudformation/*.yaml
 
 $(TERRAFORM_DOCS):
 	GOBIN=$(BIN) go install github.com/terraform-docs/terraform-docs@$(TERRAFORM_DOCS_VERSION)

@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::LanguageExtensions
+Description: >-
+  Natterjack egress slots for one zone of one cluster: ENIs with their own
+  Elastic IPs, the source/destination check off, the tags the controller and
+  the VPC CNI read, and a security group that admits nothing from the
+  internet. Optionally, the zone's bootstrap route. Deploy one stack per zone.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: The EKS cluster's name, as the chart's clusterName.
+    AllowedPattern: "^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: The cluster's VPC.
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      A public subnet in this zone, routing 0.0.0.0/0 to an internet gateway.
+  SlotIndexes:
+    Type: CommaDelimitedList
+    Default: "0,1"
+    Description: >-
+      One entry per slot, starting at 0. Two slots give the zone a warm
+      replacement. Slot 0 carries the bootstrap route.
+  BootstrapRouteTableId:
+    Type: String
+    Default: ""
+    Description: >-
+      A private route table in this zone whose 0.0.0.0/0 route should point
+      at slot 0, so nodes reach the internet before their agent runs. Leave
+      empty if the cluster keeps another default route.
+  BootstrapSourceCidr:
+    Type: String
+    Default: ""
+    Description: >-
+      With a bootstrap route, the source the slots admit: the VPC's CIDR, or
+      the block holding the nodes and pods behind that route table. AWS
+      filters routed traffic by the slot's security group.
+    AllowedPattern: "^$|^([0-9]{1,3}\\.){3}[0-9]{1,3}/([89]|[12][0-9]|3[0-2])$"
+
+Conditions:
+  HasBootstrapRoute: !Not [!Equals [!Ref BootstrapRouteTableId, ""]]
+
+Rules:
+  BootstrapNeedsSource:
+    RuleCondition: !Not [!Equals [!Ref BootstrapRouteTableId, ""]]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref BootstrapSourceCidr, ""]]
+        AssertDescription: A bootstrap route needs BootstrapSourceCidr.
+
+Resources:
+  SlotSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Natterjack egress slots: only replies from the internet return."
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - Description: Egress to the internet.
+          IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub natterjack-${ClusterName}-slot
+
+  RoutedIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasBootstrapRoute
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030] # the empty default never reaches here
+    Properties:
+      GroupId: !Ref SlotSecurityGroup
+      Description: Traffic routed to the slot by a bootstrap route.
+      IpProtocol: "-1"
+      CidrIp: !Ref BootstrapSourceCidr
+
+  Fn::ForEach::Slots:
+    - Index
+    - !Ref SlotIndexes
+    - Slot${Index}:
+        Type: AWS::EC2::NetworkInterface
+        Properties:
+          Description: !Sub Natterjack egress slot for ${ClusterName}
+          SubnetId: !Ref SubnetId
+          GroupSet:
+            - !Ref SlotSecurityGroup
+          SourceDestCheck: false
+          Tags:
+            - Key: Name
+              Value: !Sub natterjack-${ClusterName}-${Index}
+            - Key: natterjack.io/egress
+              Value: "true"
+            - Key: natterjack.io/cluster
+              Value: !Ref ClusterName
+            - Key: node.k8s.amazonaws.com/no_manage
+              Value: "true"
+      Address${Index}:
+        Type: AWS::EC2::EIP
+        Properties:
+          Domain: vpc
+          Tags:
+            - Key: Name
+              Value: !Sub natterjack-${ClusterName}-${Index}
+      Association${Index}:
+        Type: AWS::EC2::EIPAssociation
+        Properties:
+          AllocationId: !GetAtt [!Sub "Address${Index}", AllocationId]
+          NetworkInterfaceId: !Ref
+            Fn::Sub: Slot${Index}
+
+  BootstrapRoute:
+    Type: AWS::EC2::Route
+    Condition: HasBootstrapRoute
+    Properties:
+      RouteTableId: !Ref BootstrapRouteTableId
+      DestinationCidrBlock: 0.0.0.0/0
+      NetworkInterfaceId: !Ref Slot0
+
+Outputs:
+  SlotSecurityGroupId:
+    Description: Security group on every slot of this zone.
+    Value: !Ref SlotSecurityGroup
+  Fn::ForEach::SlotOutputs:
+    - Index
+    - !Ref SlotIndexes
+    - PublicIp${Index}:
+        Description: !Sub Address slot ${Index} sends from.
+        Value: !Ref
+          Fn::Sub: Address${Index}

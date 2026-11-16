@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Natterjack controller identity for one EKS cluster: an IAM role that may
+  attach and detach only this cluster's egress slots, and only on this
+  cluster's instances, bound to the controller's ServiceAccount through EKS
+  Pod Identity. Optionally, the agent tunnel rule between nodes.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Description: The EKS cluster's name, as the chart's clusterName.
+    AllowedPattern: "^[0-9A-Za-z][A-Za-z0-9_-]{0,99}$"
+  Namespace:
+    Type: String
+    Default: natterjack
+    Description: Namespace the chart is installed in.
+  ServiceAccount:
+    Type: String
+    Default: natterjack-controller
+    Description: The controller's ServiceAccount.
+  NodeSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: >-
+      Security group shared by the cluster's nodes. When set, nodes in it may
+      reach each other on the agent tunnel and WireGuard ports.
+  TunnelPort:
+    Type: Number
+    Default: 6081
+    Description: UDP port of the agent tunnel; the chart's agent.tunnelPort.
+  WireGuardPort:
+    Type: Number
+    Default: 51871
+    Description: UDP port of the WireGuard tunnel; the chart's agent.wireguardPort.
+  PermissionsBoundary:
+    Type: String
+    Default: ""
+    Description: ARN of a permissions boundary for the role, if your account requires one.
+
+Conditions:
+  HasNodeGroup: !Not [!Equals [!Ref NodeSecurityGroupId, ""]]
+  HasBoundary: !Not [!Equals [!Ref PermissionsBoundary, ""]]
+
+Resources:
+  ControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: !Sub "Natterjack controller for ${ClusterName}: moves this cluster's egress ENIs between its nodes."
+      MaxSessionDuration: 3600
+      PermissionsBoundary: !If [HasBoundary, !Ref PermissionsBoundary, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pods.eks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      # A Sub'd JSON document, because a condition key below contains the
+      # cluster name, which a YAML key cannot. It matches the Terraform
+      # module's policy statement for statement.
+      Policies:
+        - PolicyName: natterjack-controller
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "ReadNetworking",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeNetworkInterfaces",
+                    "ec2:DescribeRouteTables",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeSubnets",
+                    "ec2:DescribeVpcs"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "MoveOnlyThisClustersEgressENIs",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AttachNetworkInterface",
+                    "ec2:DetachNetworkInterface"
+                  ],
+                  "Resource": "arn:${AWS::Partition}:ec2:*:*:network-interface/*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:ResourceTag/natterjack.io/egress": "true",
+                      "aws:ResourceTag/natterjack.io/cluster": "${ClusterName}"
+                    }
+                  }
+                },
+                {
+                  "Sid": "OnlyOnThisClustersEKSNodes",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AttachNetworkInterface",
+                    "ec2:DetachNetworkInterface"
+                  ],
+                  "Resource": "arn:${AWS::Partition}:ec2:*:*:instance/*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:ResourceTag/aws:eks:cluster-name": "${ClusterName}"
+                    }
+                  }
+                },
+                {
+                  "Sid": "OnlyOnThisClustersSelfManagedNodes",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:AttachNetworkInterface",
+                    "ec2:DetachNetworkInterface"
+                  ],
+                  "Resource": "arn:${AWS::Partition}:ec2:*:*:instance/*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:ResourceTag/kubernetes.io/cluster/${ClusterName}": [
+                        "owned",
+                        "shared"
+                      ]
+                    }
+                  }
+                }
+              ]
+            }
+
+  PodIdentity:
+    Type: AWS::EKS::PodIdentityAssociation
+    Properties:
+      ClusterName: !Ref ClusterName
+      Namespace: !Ref Namespace
+      ServiceAccount: !Ref ServiceAccount
+      RoleArn: !GetAtt ControllerRole.Arn
+
+  TunnelRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasNodeGroup
+    Properties:
+      GroupId: !Ref NodeSecurityGroupId
+      SourceSecurityGroupId: !Ref NodeSecurityGroupId
+      Description: Natterjack agent tunnel between nodes.
+      IpProtocol: udp
+      FromPort: !Ref TunnelPort
+      ToPort: !Ref TunnelPort
+
+  WireGuardRule:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: HasNodeGroup
+    Properties:
+      GroupId: !Ref NodeSecurityGroupId
+      SourceSecurityGroupId: !Ref NodeSecurityGroupId
+      Description: Natterjack WireGuard tunnel between nodes.
+      IpProtocol: udp
+      FromPort: !Ref WireGuardPort
+      ToPort: !Ref WireGuardPort
+
+Outputs:
+  ControllerRoleArn:
+    Description: IAM role the controller runs as.
+    Value: !GetAtt ControllerRole.Arn

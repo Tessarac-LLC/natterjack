@@ -50,6 +50,9 @@ Kubernetes: `>=1.34.0-0`
 
 ## Values
 
+Annotated examples for common installations are in the
+[values reference](https://natterjack.io/docs/reference/helm-values/).
+
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `agent.affinity` | object | `{}` | Affinity for agent pods. |
