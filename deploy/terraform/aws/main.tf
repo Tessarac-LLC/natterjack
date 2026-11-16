@@ -154,6 +154,7 @@ resource "aws_iam_role" "controller" {
   description          = "Natterjack controller for ${var.cluster_name}: moves this cluster's egress ENIs between its nodes."
   assume_role_policy   = jsonencode({ Version = "2012-10-17", Statement = [local.trust[var.identity]] })
   max_session_duration = 3600
+  permissions_boundary = var.permissions_boundary
   tags                 = var.tags
 
   lifecycle {

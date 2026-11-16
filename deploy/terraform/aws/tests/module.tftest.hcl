@@ -213,3 +213,16 @@ run "plans_with_subnets_created_in_the_same_apply" {
     error_message = "Two zones with two slots each."
   }
 }
+
+run "permissions_boundary_on_the_controller_role" {
+  command = plan
+
+  variables {
+    permissions_boundary = "arn:aws:iam::111122223333:policy/boundary"
+  }
+
+  assert {
+    condition     = aws_iam_role.controller.permissions_boundary == "arn:aws:iam::111122223333:policy/boundary"
+    error_message = "The controller role carries the given permissions boundary."
+  }
+}

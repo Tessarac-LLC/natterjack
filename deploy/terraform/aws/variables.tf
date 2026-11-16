@@ -102,3 +102,9 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "permissions_boundary" {
+  description = "ARN of a permissions boundary for the controller's IAM role, for accounts that require one on every role. Null for none."
+  type        = string
+  default     = null
+}

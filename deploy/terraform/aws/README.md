@@ -107,6 +107,7 @@ No modules.
 | namespace | Namespace the chart is installed in. | `string` | `"natterjack"` | no |
 | node\_security\_group\_ids | Security groups of the cluster's nodes. The module allows the agent tunnels (UDP) from each of these groups to each. Empty to manage the rules yourself. | `list(string)` | `[]` | no |
 | oidc\_provider\_arn | ARN of the cluster's IAM OIDC provider. Required when identity is "irsa". | `string` | `null` | no |
+| permissions\_boundary | ARN of a permissions boundary for the controller's IAM role, for accounts that require one on every role. Null for none. | `string` | `null` | no |
 | service\_account | The controller's ServiceAccount name. The chart default is `<release>-controller`, so `natterjack-controller` for a release named natterjack. | `string` | `"natterjack-controller"` | no |
 | slots\_per\_subnet | Slots (ENI with an Elastic IP) per subnet. Two give a zone a warm replacement: the controller fails over by moving an attached slot or using a spare. | `number` | `2` | no |
 | tags | Tags added to every resource the module creates. Cannot override the natterjack.io and no\_manage tags. | `map(string)` | `{}` | no |
