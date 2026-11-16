@@ -43,6 +43,9 @@ type Desired struct {
 	// Rings map each pool's buckets to gateway marks. A pool with no live
 	// gateway has no ring, and its traffic is left to the node's own routes.
 	Rings map[string][Buckets]uint32
+	// CrossZone are the pools, sorted, whose rings use other zones'
+	// gateways because none in this node's zone is live.
+	CrossZone []string
 	// Gateways map each mark in use to the gateway's node IP. Marks stay
 	// while a gateway drains so its established flows keep working.
 	Gateways map[uint32]netip.Addr

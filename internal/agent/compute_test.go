@@ -18,6 +18,7 @@ package agent
 
 import (
 	"encoding/json"
+	"maps"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -112,6 +113,9 @@ func TestRingPrefersOwnZone(t *testing.T) {
 	if d.NodeIP != ip("10.0.1.50") || len(d.Nodes) != 4 {
 		t.Fatalf("node %v nodes %v", d.NodeIP, d.Nodes)
 	}
+	if len(d.CrossZone) != 0 {
+		t.Fatalf("cross-zone pools %v with live gateways in the zone", d.CrossZone)
+	}
 }
 
 func TestRingFallsBackAcrossZones(t *testing.T) {
@@ -121,6 +125,9 @@ func TestRingFallsBackAcrossZones(t *testing.T) {
 	d, _ := Compute(s, mustMarks(t))
 	if got := ringGateways(d); !slices.Equal(got, []netip.Addr{ip("10.0.2.10")}) {
 		t.Fatalf("ring uses %v; want the other zone when this zone has no live gateway", got)
+	}
+	if want := slices.Collect(maps.Keys(d.Rings)); !slices.Equal(d.CrossZone, want) {
+		t.Fatalf("cross-zone pools %v, want %v", d.CrossZone, want)
 	}
 	if len(d.Gateways) != 3 {
 		t.Fatal("down and draining gateways keep their marks")

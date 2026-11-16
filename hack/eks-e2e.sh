@@ -321,7 +321,7 @@ record "pod traffic: steered-a from $(from steered-a), steered-b from $(from ste
 # records "<epoch ms> <address or FAIL>" to $work/flows-POD.
 watch_flows() {
 	kubectl -n e2e exec "$2" -- bash -c "end=\$((SECONDS + $3)); while ((SECONDS < end)); do
-		a=\$(curl -fsS --max-time 1 http://$outside_ip/ 2>/dev/null || echo FAIL); echo \"\$((\${EPOCHREALTIME/./} / 1000)) \$a\"; sleep 0.2; done" \
+		a=\$(curl -fsS --max-time 1 http://$outside_ip/ 2>/dev/null) || a=FAIL; echo \"\$((\${EPOCHREALTIME/./} / 1000)) \${a:-EMPTY}\"; sleep 0.2; done" \
 		>"$work/flows-$2" 2>/dev/null
 }
 # flow_gap POD: the longest run of failed requests, in ms (0 if none).
@@ -329,7 +329,19 @@ flow_gap() {
 	awk '$2 == "FAIL" { if (!s) s = $1; e = $1 } $2 != "FAIL" { if (s && e - s + 200 > m) m = e - s + 200; s = 0 }
 		END { if (s && e - s + 200 > m) m = e - s + 200; print m + 0 }' "$work/flows-$1"
 }
-flows_in_zone() { ! awk '$2 != "FAIL" { print $2 }' "$work/flows-$1" | sort -u | grep -vxF -f <(slot_ips "$2"); }
+# flows_in_zone POD ZONE: whether every answered request left from a slot in
+# ZONE. The record is kept in $OUT, and each answer from elsewhere is printed
+# with its time.
+flows_in_zone() {
+	local ms addr bad
+	cp "$work/flows-$1" "$OUT/flows-$1-$(date -u +%H%M%S)"
+	bad="$(awk 'NR == FNR { ok[$1] = 1; next } $2 != "FAIL" && !($2 in ok)' <(slot_ips "$2") "$work/flows-$1")"
+	[[ -z "$bad" ]] && return 0
+	while read -r ms addr; do
+		echo "  $(jq -rn --argjson ms "$ms" '$ms / 1000 | floor | todate') $addr"
+	done <<<"$bad" | head -n 20
+	return 1
+}
 
 step "agent restart"
 stream() {

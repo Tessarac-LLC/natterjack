@@ -48,6 +48,12 @@ inter-zone data transfer is charged per GB. Fix the zone's slots as for
 `Degraded`. A zone with nodes and no slot at all needs a public subnet and a
 slot there.
 
+The condition reflects the gateways' own readiness. A node can also send a
+zone's traffic elsewhere when its probes cannot reach that zone's gateways
+through the tunnel; its agent then logs `gateway unreachable from this node`
+and `no live gateway in this node's zone`, and logs again when that ends.
+`natterjack_agent_gateways_down` counts the gateways a node sees as down.
+
 ### CloudAccess
 
 `False` with reason `CloudCallFailed` means the controller cannot list slots

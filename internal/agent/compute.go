@@ -194,8 +194,10 @@ func Compute(s *Snapshot, marks *Marks) (Desired, []string) {
 			d.Rings[pool] = Ring(local)
 		case len(anyZone) > 0:
 			d.Rings[pool] = Ring(anyZone)
+			d.CrossZone = append(d.CrossZone, pool)
 		}
 	}
+	slices.Sort(d.CrossZone)
 
 	d.Steers, problems = steers(s, problems)
 	return d, problems

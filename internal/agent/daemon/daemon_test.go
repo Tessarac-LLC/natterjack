@@ -24,11 +24,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -472,5 +475,28 @@ func TestRestartedAgentKeepsServing(t *testing.T) {
 	}
 	if got, _ := dataplane.LoadRole(dir); got != "" {
 		t.Fatalf("the record %q outlived the slot", got)
+	}
+}
+
+// TestReportPathsLogsTransitions checks that a gateway this node cannot reach,
+// and a pool sent to another zone, are logged once when they start and once
+// when they end.
+func TestReportPathsLogsTransitions(t *testing.T) {
+	var lines []string
+	a := &Agent{Log: funcr.New(func(_, args string) { lines = append(lines, args) }, funcr.Options{})}
+	gw := netip.MustParseAddr("10.0.1.10")
+
+	a.reportPaths(map[netip.Addr]bool{gw: true}, []string{"default"})
+	a.reportPaths(map[netip.Addr]bool{gw: true}, []string{"default"})
+	a.reportPaths(nil, nil)
+
+	want := []string{
+		`"level"=0 "msg"="gateway unreachable from this node; new flows avoid it" "gateway"="10.0.1.10"`,
+		`"level"=0 "msg"="no live gateway in this node's zone; new flows use other zones" "pool"="default"`,
+		`"level"=0 "msg"="gateway reachable again" "gateway"="10.0.1.10"`,
+		`"level"=0 "msg"="a gateway in this node's zone is live again; new flows stay in the zone" "pool"="default"`,
+	}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("logged:\n%s\nwant:\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
 	}
 }

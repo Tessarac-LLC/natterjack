@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -110,11 +111,14 @@ type Agent struct {
 	Inherited    string
 	InheritUntil time.Time
 
-	wake      chan event.GenericEvent
-	ready     atomic.Bool
-	mu        sync.Mutex
-	test      selfTest
-	problems  string
+	wake     chan event.GenericEvent
+	ready    atomic.Bool
+	mu       sync.Mutex
+	test     selfTest
+	problems string
+	// down and crossZone are what reportPaths last logged.
+	down      map[netip.Addr]bool
+	crossZone []string
 	savedRole string
 	roleSaved bool
 	hold      agent.Hold
@@ -193,6 +197,7 @@ func (a *Agent) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.R
 	a.report(problems)
 	problemCount.Set(float64(len(problems)))
 	gatewaysDown.Set(float64(len(s.Down)))
+	a.reportPaths(s.Down, d.CrossZone)
 
 	st, err := a.Dataplane.Apply(&d)
 	if err != nil {
@@ -514,6 +519,35 @@ func (a *Agent) selfTestLoop(ctx context.Context, key string, public netip.Addr,
 }
 
 // report logs the problems when they change.
+// reportPaths logs when this node starts or stops seeing a gateway as down,
+// and when a pool's new flows start or stop leaving through other zones.
+func (a *Agent) reportPaths(down map[netip.Addr]bool, crossZone []string) {
+	a.mu.Lock()
+	was, wasCross := a.down, a.crossZone
+	a.down, a.crossZone = maps.Clone(down), slices.Clone(crossZone)
+	a.mu.Unlock()
+	for _, ip := range slices.SortedFunc(maps.Keys(down), netip.Addr.Compare) {
+		if !was[ip] {
+			a.Log.Info("gateway unreachable from this node; new flows avoid it", "gateway", ip.String())
+		}
+	}
+	for _, pool := range crossZone {
+		if !slices.Contains(wasCross, pool) {
+			a.Log.Info("no live gateway in this node's zone; new flows use other zones", "pool", pool)
+		}
+	}
+	for _, ip := range slices.SortedFunc(maps.Keys(was), netip.Addr.Compare) {
+		if !down[ip] {
+			a.Log.Info("gateway reachable again", "gateway", ip.String())
+		}
+	}
+	for _, pool := range wasCross {
+		if !slices.Contains(crossZone, pool) {
+			a.Log.Info("a gateway in this node's zone is live again; new flows stay in the zone", "pool", pool)
+		}
+	}
+}
+
 func (a *Agent) report(problems []string) {
 	slices.Sort(problems)
 	joined := strings.Join(problems, "\n")
