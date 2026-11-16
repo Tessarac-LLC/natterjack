@@ -49,6 +49,15 @@ traffic leaves from; give them to anyone who allow-lists you.
 With IRSA, set `identity = "irsa"` and `oidc_provider_arn`. The module's
 README lists every input.
 
+**With CloudFormation**, deploy
+[`deploy/cloudformation`](https://github.com/Tessarac-LLC/natterjack/tree/main/deploy/cloudformation)'s
+`controller.yaml` once for the cluster and `slots.yaml` once per zone. They
+create the same resources, with Pod Identity; their README lists the
+parameters.
+
+How many slots a zone needs, and on which instance types gateways carry how
+much, is in [Sizing](../sizing/).
+
 ## 2. Install the chart
 
 ```sh
@@ -108,6 +117,10 @@ access, and names anything to fix.
 
 ## 5. Move traffic off the NAT gateway
 
+On a cluster that has NAT gateways in use, follow
+[Moving off a NAT gateway](../migrate/), which also keeps their public
+addresses if destinations allow-list them. In outline:
+
 Nothing is steered until a policy selects it. Start with one namespace:
 
 ```yaml
@@ -160,7 +173,8 @@ repair after a node failure, nodes in the zone that have no agent yet cannot
 reach the internet; running agents steer around it.
 
 Apply the routes, run `natterjack doctor` again, and delete the NAT gateways
-once traffic has left through the slots for a while.
+once traffic has left through the slots for a while. [Cost](../cost/)
+compares what that saves.
 
 ## A new cluster with no NAT gateway
 

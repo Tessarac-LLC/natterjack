@@ -84,16 +84,28 @@ resource "aws_network_interface" "slot" {
 }
 
 resource "aws_eip" "slot" {
-  for_each = local.slots
+  for_each = { for k, v in local.slots : k => v if !contains(keys(var.slot_eip_allocation_ids), k) }
 
   domain = "vpc"
   tags   = merge(var.tags, { Name = "natterjack-${var.cluster_name}-${each.key}" })
 }
 
+data "aws_eip" "adopted" {
+  for_each = var.slot_eip_allocation_ids
+  id       = each.value
+}
+
+locals {
+  slot_eips = merge(
+    { for k, e in aws_eip.slot : k => { allocation_id = e.id, public_ip = e.public_ip } },
+    { for k, e in data.aws_eip.adopted : k => { allocation_id = e.id, public_ip = e.public_ip } },
+  )
+}
+
 resource "aws_eip_association" "slot" {
   for_each = local.slots
 
-  allocation_id        = aws_eip.slot[each.key].id
+  allocation_id        = local.slot_eips[each.key].allocation_id
   network_interface_id = aws_network_interface.slot[each.key].id
 }
 

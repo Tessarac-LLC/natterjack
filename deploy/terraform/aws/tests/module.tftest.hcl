@@ -8,6 +8,9 @@ mock_provider "aws" {
   mock_data "aws_vpc" {
     defaults = { cidr_block = "10.40.0.0/16" }
   }
+  mock_data "aws_eip" {
+    defaults = { public_ip = "198.51.100.7" }
+  }
   mock_resource "aws_network_interface" {
     defaults = { id = "eni-00000000000000000" }
   }
@@ -281,4 +284,50 @@ run "permissions_boundary_on_the_controller_role" {
     condition     = aws_iam_role.controller.permissions_boundary == "arn:aws:iam::111122223333:policy/boundary"
     error_message = "The controller role carries the given permissions boundary."
   }
+}
+
+run "existing_elastic_ips_are_adopted" {
+  command = apply
+
+  variables {
+    slot_eip_allocation_ids = { "us-east-1a/0" = "eipalloc-0000000000000000a" }
+  }
+
+  assert {
+    condition     = keys(aws_eip.slot) == ["us-east-1a/1"] && keys(data.aws_eip.adopted) == ["us-east-1a/0"]
+    error_message = "A slot given an allocation uses it; only the others get a new Elastic IP."
+  }
+
+  assert {
+    condition     = aws_eip_association.slot["us-east-1a/0"].allocation_id == "eipalloc-0000000000000000a"
+    error_message = "The adopted allocation is associated with its slot."
+  }
+
+  assert {
+    condition     = contains(output.public_ips, "198.51.100.7") && output.slots["us-east-1a/0"].public_ip == "198.51.100.7"
+    error_message = "Adopted addresses are reported like created ones."
+  }
+}
+
+run "elastic_ips_for_unknown_slots_are_refused" {
+  command = plan
+
+  variables {
+    slot_eip_allocation_ids = { "us-east-1a/2" = "eipalloc-0000000000000000a" }
+  }
+
+  expect_failures = [var.slot_eip_allocation_ids]
+}
+
+run "one_elastic_ip_for_two_slots_is_refused" {
+  command = plan
+
+  variables {
+    slot_eip_allocation_ids = {
+      "us-east-1a/0" = "eipalloc-0000000000000000a"
+      "us-east-1a/1" = "eipalloc-0000000000000000a"
+    }
+  }
+
+  expect_failures = [var.slot_eip_allocation_ids]
 }

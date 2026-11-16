@@ -29,6 +29,27 @@ variable "slots_per_subnet" {
   }
 }
 
+variable "slot_eip_allocation_ids" {
+  description = "Existing Elastic IP allocations to give slots instead of new ones, keyed by slot as zone/index (\"us-east-1a/0\" is the zone's first slot). Use it to keep addresses others allow-list, such as a NAT gateway's after deleting the gateway. Terraform never releases an adopted address."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([for k in keys(var.slot_eip_allocation_ids) : (
+      length(split("/", k)) == 2
+      && contains(keys(var.slot_subnets), split("/", k)[0])
+      && can(tonumber(split("/", k)[1]))
+      && try(tonumber(split("/", k)[1]) >= 0 && tonumber(split("/", k)[1]) < var.slots_per_subnet && floor(tonumber(split("/", k)[1])) == tonumber(split("/", k)[1]), false)
+    )])
+    error_message = "Every slot_eip_allocation_ids key must name a slot: a slot_subnets key, a slash, and an index below slots_per_subnet."
+  }
+
+  validation {
+    condition     = length(distinct(values(var.slot_eip_allocation_ids))) == length(var.slot_eip_allocation_ids)
+    error_message = "An Elastic IP allocation can belong to only one slot."
+  }
+}
+
 variable "bootstrap_route_table_ids" {
   description = "Private route tables, keyed by zone name as in slot_subnets, whose 0.0.0.0/0 route should point at that zone's first slot. Nodes then reach the internet before their agent runs. Leave empty if the cluster keeps another default route."
   type        = map(string)
