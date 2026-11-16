@@ -158,6 +158,43 @@ reach the internet; running agents steer around it.
 Apply the routes, run `natterjack doctor` again, and delete the NAT gateways
 once traffic has left through the slots for a while.
 
+## A new cluster with no NAT gateway
+
+On an existing cluster, install Natterjack before removing the NAT gateway,
+as above: everything Natterjack needs comes through the NAT until its
+gateways run.
+
+A cluster created without a NAT gateway has a chicken-and-egg problem. Until
+the controller runs, no slot is attached, so the bootstrap route leads
+nowhere. The nodes must join, and pull Natterjack's images, without the
+internet:
+
+1. **VPC endpoints** in the private subnets: the S3 gateway endpoint, and
+   interface endpoints for `ec2`, `ecr.api`, `ecr.dkr`, `sts`, `eks`, and
+   `eks-auth` (Pod Identity). Add `ssm`, `ssmmessages` and `ec2messages` to
+   reach nodes with Session Manager.
+2. **Images in the VPC's reach.** Copy the chart and images to ECR in the
+   cluster's account and region, after [verifying](../security/verify/) them
+   on GHCR. A copy keeps each image's digest, which the chart pins:
+
+   ```sh
+   for i in natterjack-controller natterjack-agent natterjack; do
+     crane copy ghcr.io/tessarac-llc/$i:v1.0.0 <account>.dkr.ecr.<region>.amazonaws.com/$i:v1.0.0
+   done
+   crane copy ghcr.io/tessarac-llc/charts/natterjack:1.0.0 <account>.dkr.ecr.<region>.amazonaws.com/charts/natterjack:1.0.0
+   ```
+
+   Install from there, pointing `controller.image.repository`,
+   `agent.image.repository` and `doctor.image.repository` at the copies.
+3. **Then the order above**: the Terraform module (with
+   `bootstrap_route_table_ids`), the chart, a pool, a `ClusterEgressPolicy`
+   with `nodeTraffic: true`.
+
+Once the first slot in a zone is attached, the bootstrap route works, and
+nodes that start later reach the internet before their agent runs. Natterjack's
+own end-to-end test builds a cluster this way:
+[`test/eks`](https://github.com/Tessarac-LLC/natterjack/tree/main/test/eks).
+
 ## Uninstalling
 
 Put a default route back on the private subnets first if you removed the NAT
