@@ -21,7 +21,7 @@ what causes it and what to do.
 ### Ready
 
 | Status | Reason | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | True | `GatewaysReady` | At least one gateway serves its slot. |
 | False | `NoReadyGateway` | No gateway serves. Selected traffic has no way out except the bootstrap route. |
 
@@ -114,7 +114,7 @@ detached and never used until it passes. Each slot's `reason` names every
 failing check:
 
 | Reason | Fix |
-|---|---|
+| --- | --- |
 | `security group sg-… allows inbound traffic from outside the VPC; a slot's security groups may admit only the VPC's own IPv4 blocks` | Remove every inbound rule whose source is not an IPv4 CIDR inside one of the VPC's associated blocks: wider CIDRs, IPv6 ranges, prefix lists and security groups. A security group the controller cannot read counts as open. |
 | `the ENI has no security group` | Attach the module's empty security group. |
 | `no Elastic IP is associated with the ENI` | Associate one. The module does this. |
@@ -141,7 +141,7 @@ ip-10-0-1-12 does not match gatewayNodeSelector role=egress)
 ```
 
 | Per-node reason | Meaning |
-|---|---|
+| --- | --- |
 | `already a gateway` | A node serves one slot at a time. Add nodes or remove slots. |
 | `not ready` | The node is not Ready. |
 | `no agent` / `agent not ready` | The agent pod is missing or not ready on that node; see [the agent](#the-agent). |
@@ -164,7 +164,7 @@ address is left out of `status.publicIPs`.
 ## Slot states
 
 | State | Meaning | Usual reasons |
-|---|---|---|
+| --- | --- | --- |
 | `Pending` | Valid, not yet on a node | `detaching from an instance whose node is gone`; `moving off node …, which is not ready`, `…, which has no agent`, `…, which already serves slot …`; `moved off node …: <why>` |
 | `Attaching` | Attached; the gateway has not yet passed its self-test | `waiting for the gateway to report ready`; `the agent on node … is restarting; the slot moves if it is not back in 45s` |
 | `Active` | Serving | Empty; with `safetyChecks: Warn`, the checks it fails |
@@ -182,7 +182,7 @@ A slot stuck in `Attaching` waits for its gateway's self-test; read the
 The controller records events on the pool:
 
 | Reason | Type | When |
-|---|---|---|
+| --- | --- | --- |
 | `SlotActive`, `SlotPending`, `SlotAttaching`, `SlotDraining`, `SlotSpare` | Normal | A slot changes state; the message carries its node and reason |
 | `SlotQuarantined`, `SlotUnschedulable`, `SlotForeign` | Warning | As above |
 | `SlotAttached`, `SlotDetached` | Normal | An attach or detach succeeded, with the reason for a detach |
@@ -211,7 +211,7 @@ not ready until the first apply succeeds, and the node's traffic is not
 steered.
 
 | Message | Fix |
-|---|---|
+| --- | --- |
 | `net.ipv4.conf.all.rp_filter is 1 (strict); set it to 0 or 2, as EKS AMIs do` | Set it to 0 or 2 on the node, for example in the launch template's user data. Strict mode drops steered replies. |
 | `net.ipv4.ip_forward must be 1 on a Kubernetes node` | Enable forwarding. |
 | `… this kernel's GENEVE devices cannot carry IP packets; the agent needs Linux 5.18 or later` | Use a newer AMI (Amazon Linux 2023, Bottlerocket). See [Compatibility](../compatibility/). |
@@ -227,7 +227,7 @@ steered.
 Present only on nodes that serve or served a slot.
 
 | Status and reason | Meaning |
-|---|---|
+| --- | --- |
 | True `Serving` | `serving slot <id>` |
 | False `SelfTestPending` | Waiting for the first self-test through the slot. |
 | False `SelfTestFailed` | Three self-tests in a row failed; the gateway is out of service. See below. |
@@ -241,7 +241,7 @@ The self-test fetches `agent.selfTest.url` (default
 checks that the answer is the slot's own public IP. Failures:
 
 | Message | Fix |
-|---|---|
+| --- | --- |
 | `traffic leaves from X, not the slot's public IP Y` | Something else routes the gateway's traffic: check the slot subnet's route table and that the Elastic IP is still associated with the slot. |
 | `self-test through the slot: … timeout` | The slot subnet has no route to an internet gateway, a network ACL drops the traffic, or the security group has no outbound rule. |
 | `resolve self-test host: …` | The node cannot resolve DNS. |
@@ -263,7 +263,7 @@ the cluster, the VPC and the pod ranges is never steered.
 ## Install and admission errors
 
 | Error | Fix |
-|---|---|
+| --- | --- |
 | `clusterName is required: …` | Set `clusterName` to the module's `cluster_name`. |
 | `controller.aws.region is required` | Set the region. |
 | `namespace … enforces Pod Security "…"; the agent needs "privileged". …` | Label the namespace, or install with `namespace.create=true` into a new one. |
