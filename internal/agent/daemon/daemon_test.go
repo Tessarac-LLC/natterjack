@@ -249,14 +249,29 @@ func TestGatewayLifecycle(t *testing.T) {
 	}
 	want(corev1.ConditionFalse, "SelfTestPending", "")
 
-	// The first self-test passes: the gateway is ready, for this slot only.
+	// One pass is not enough: a fresh attachment can pass once and then
+	// drop the next flow. A failure starts the count again.
+	tests <- nil
+	tests <- nil
+	reconcileOnce()
+	want(corev1.ConditionFalse, "SelfTestPending", "")
+	boom := errors.New("checkip unreachable")
+	tests <- boom
+	<-a.wake
+	reconcileOnce()
+	want(corev1.ConditionFalse, "SelfTestFailed", boom.Error())
+	tests <- nil
+	tests <- nil
+	reconcileOnce()
+	want(corev1.ConditionFalse, "SelfTestPending", "")
+
+	// Three passes in a row: the gateway is ready, for this slot only.
 	tests <- nil
 	<-a.wake
 	reconcileOnce()
 	want(corev1.ConditionTrue, "Serving", v1.GatewayReadyMessage("eni-1"))
 
 	// One failed self-test is not enough to leave service; three are.
-	boom := errors.New("checkip unreachable")
 	tests <- boom
 	tests <- boom
 	reconcileOnce()
