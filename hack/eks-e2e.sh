@@ -156,6 +156,11 @@ ssm_result() {
 }
 
 step "cluster $cluster in $region"
+# A run that failed part-way may have left the infrastructure changed (a
+# deleted identity association, a deleted slot); start from what Terraform
+# declares.
+tf_apply
+refresh_outputs
 aws eks update-kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG" >/dev/null
 kubectl get nodes -L topology.kubernetes.io/zone,kubernetes.io/arch,node.kubernetes.io/instance-type
 nodes_ready() { (($(kubectl get nodes --no-headers | grep -cw Ready) >= 8)); }
