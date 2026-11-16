@@ -1,0 +1,110 @@
+---
+title: Helm values
+weight: 10
+description: Every value the Natterjack chart takes, with annotated examples for common installations.
+---
+
+<!-- Generated from charts/natterjack/values.yaml by 'make chart-docs'. Edit
+site/helm-values.md.gotmpl or the comments in values.yaml, not this file. -->
+
+The chart validates every value against its schema, so a misspelled key or a
+value of the wrong type fails `helm install` rather than being ignored.
+
+## Examples
+
+### EKS with Pod Identity
+
+The smallest installation. The controller's role comes from the Terraform
+module or the CloudFormation templates, bound to its ServiceAccount by an EKS
+Pod Identity association, so the ServiceAccount needs no annotation.
+
+```yaml
+# The name the slots are tagged with: natterjack.io/cluster=prod-east.
+clusterName: prod-east
+namespace:
+  # Create the namespace with the Pod Security "privileged" label the agent
+  # needs. Do not also pass Helm's --create-namespace.
+  create: true
+controller:
+  aws:
+    region: us-east-1
+```
+
+### IAM roles for service accounts
+
+```yaml
+clusterName: prod-east
+controller:
+  aws:
+    region: us-east-1
+  serviceAccount:
+    annotations:
+      # The module's controller_role_arn output.
+      eks.amazonaws.com/role-arn: arn:aws:iam::111122223333:role/natterjack-prod-east
+```
+
+### Calico
+
+Calico keeps its packet marks in `0xffff0000`, which overlaps the agent's
+default. Give the agent bits Calico does not use. With Calico's eBPF data
+plane, `steering: auto` already picks `ebpf`.
+
+```yaml
+agent:
+  markMask: "0x00003f00"
+```
+
+### Public ranges inside the VPC
+
+Private, shared, link-local and reserved ranges are never steered. A VPC that
+uses public addresses internally lists them, so traffic to them stays on the
+VPC's own routes.
+
+```yaml
+agent:
+  excludedCIDRs:
+    - 100.20.0.0/16
+```
+
+### Pinned images from a mirror
+
+Pin every image by digest, as printed by the release notes and checked by
+[Verifying a release](../../security/verify/). A digest takes precedence over
+a tag.
+
+```yaml
+images:
+  pullSecrets: [registry-mirror]
+controller:
+  image:
+    repository: registry.example.com/natterjack/natterjack-controller
+    digest: sha256:<controller digest>
+agent:
+  image:
+    repository: registry.example.com/natterjack/natterjack-agent
+    digest: sha256:<agent digest>
+doctor:
+  image:
+    repository: registry.example.com/natterjack/natterjack
+    digest: sha256:<natterjack digest>
+```
+
+### Faster upgrades on large clusters
+
+An agent restart leaves the node's slot, its traffic and the probe responder
+in the kernel, so restarting several agents at once interrupts nothing that
+finishes within a minute.
+
+```yaml
+agent:
+  updateStrategy:
+    maxUnavailable: 10%
+```
+
+## All values
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+{{- range .Values }}
+| `{{ .Key }}` | {{ .Type }} | {{ if .Default }}{{ .Default }}{{ else }}{{ .AutoDefault }}{{ end }} | {{ if .Description }}{{ .Description }}{{ else }}{{ .AutoDescription }}{{ end }} |
+{{- end }}

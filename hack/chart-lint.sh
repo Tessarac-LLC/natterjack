@@ -75,5 +75,9 @@ done
 echo "== the values reference is current"
 (cd "$chart/../.." && helm-docs --chart-search-root charts --template-files README.md.gotmpl >/dev/null)
 git -C "$chart" diff --exit-code -- README.md || fail "charts/natterjack/README.md is stale: run 'make chart-docs' and commit"
+(cd "$chart/../.." && helm-docs --chart-search-root charts --template-files ../../site/helm-values.md.gotmpl \
+  --output-file ../../site/content/docs/reference/helm-values/_index.md >/dev/null)
+git -C "$chart/../.." diff --exit-code -- site/content/docs/reference/helm-values/_index.md ||
+  fail "site/content/docs/reference/helm-values/_index.md is stale: run 'make chart-docs' and commit"
 
 echo "PASS"

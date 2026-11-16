@@ -83,8 +83,10 @@ chart-lint: chart-tools ## Lint the chart, validate every rendering, check bad i
 	PATH="$(CHART_PATH)" ./hack/chart-lint.sh
 
 .PHONY: chart-docs
-chart-docs: chart-tools ## Regenerate the chart README's values reference
+chart-docs: chart-tools ## Regenerate the chart README's and the site's values reference
 	$(HELM_DOCS) --chart-search-root charts --template-files README.md.gotmpl
+	$(HELM_DOCS) --chart-search-root charts --template-files ../../site/helm-values.md.gotmpl \
+		--output-file ../../site/content/docs/reference/helm-values/_index.md
 
 .PHONY: chart-e2e
 chart-e2e: chart-tools ## Install the chart on a throwaway kind cluster and prove it (needs Docker)
