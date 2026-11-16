@@ -50,9 +50,18 @@ jobs:
       - name: Tests and chart checks
         run: make test chart-lint
 
+  # The whole suite on a real EKS cluster: nothing is published unless it
+  # passes on this commit.
+  eks-e2e:
+    needs: verify
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/eks-e2e.yml
+
   publish:
     name: release / publish
-    needs: verify
+    needs: [verify, eks-e2e]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release
