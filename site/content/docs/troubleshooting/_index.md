@@ -218,6 +218,7 @@ steered.
 | `… the kernel has no WireGuard (Linux 5.6 or later, module wireguard)` | Load the module or use `tunnel: Geneve`. |
 | `… the kernel has no tcx (Linux 6.6 or later)` | Only the eBPF fast path needs tcx. Set `agent.steering=nftables`, or use a newer kernel. |
 | `other rules on the node use the agent's mark bits 0x…, so steering would fail: …; set agent.markMask to bits none of them use` | Another component uses the same packet-mark bits; the message names the rule. Pick free bits for `agent.markMask` (with Calico, `"0x00003f00"`). |
+| `policy routing rules sort ahead of the agent's (priority …) and can route steered traffic past its gateways: …; set agent.rulePriority below …` | A rule that picks a route by mark, source or interface comes before the agent's, so steered pod traffic would follow it, usually the node's default route, instead of the agent's choice of gateway. The AWS VPC CNI's rules are at 1024 and 1536, after the default of 1000. Set `agent.rulePriority` below the rule the message names. |
 | `node has no IPv4 address`, `no interface has the node address …` | The node needs an IPv4 InternalIP on an interface. |
 | `pin gateway namespace at … (is the state directory a shared host mount?)` | The chart mounts the state directory from the host. Restore its default if it was changed. |
 

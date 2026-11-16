@@ -311,8 +311,19 @@ spec:
   nodeTraffic: true
 EOF
 node_steered() { in_zone "$2" "$(from "$1")"; }
+# spread POD ZONE: POD's new connections are spread over every gateway in
+# ZONE. Traffic that something on the node routes past the agent's rules
+# still leaves from the zone, through its bootstrap slot, but always from
+# that one address.
+spread() {
+	local got
+	got="$(kubectl -n e2e exec "$1" -- bash -c "for i in \$(seq 48); do curl -fsS --max-time 2 http://$outside_ip/; echo; done" 2>/dev/null | grep . | sort -u)"
+	[[ "$got" == "$(slot_ips "$2" | sort -u)" ]]
+}
 eventually 60 "node traffic in ${zones[0]} is steered" node_steered node-a "${zones[0]}"
 eventually 60 "node traffic in ${zones[1]} is steered" node_steered node-b "${zones[1]}"
+eventually 60 "node traffic in ${zones[0]} uses every gateway in its zone" spread node-a "${zones[0]}"
+eventually 60 "node traffic in ${zones[1]} uses every gateway in its zone" spread node-b "${zones[1]}"
 kubectl -n e2e run pull --image="$pullable" --restart=Never --overrides="{\"spec\":{\"nodeName\":\"$src_a\"}}" -- true >/dev/null
 pulled() { [[ "$(kubectl -n e2e get pod pull -o jsonpath='{.status.phase}')" == Succeeded ]]; }
 eventually 300 "a node pulls an image from Docker Hub" pulled
@@ -332,7 +343,9 @@ spec:
 EOF
 eventually 60 "steered-a leaves from a ${zones[0]} Elastic IP" node_steered steered-a "${zones[0]}"
 eventually 60 "steered-b leaves from a ${zones[1]} Elastic IP" node_steered steered-b "${zones[1]}"
-record "pod traffic: steered-a from $(from steered-a), steered-b from $(from steered-b)"
+eventually 60 "steered-a uses every gateway in ${zones[0]}" spread steered-a "${zones[0]}"
+eventually 60 "steered-b uses every gateway in ${zones[1]}" spread steered-b "${zones[1]}"
+record "pod traffic: steered-a from $(from steered-a), steered-b from $(from steered-b); new connections of each spread over every gateway in its zone"
 
 # watch_flows ZONE POD SECONDS: opens a new connection every 200ms and
 # records "<epoch ms> <address or FAIL>" to $work/flows-POD.
@@ -429,7 +442,7 @@ sleep 5
 kill "$watch" 2>/dev/null || true
 wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
-((gap == 0)) || fail "new connections failed for ${gap}ms while $gw drained"
+((gap == 0)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms while $gw drained"; }
 flows_in_zone steered-a "${zones[0]}" || fail "a connection left outside ${zones[0]} during the drain"
 kubectl uncordon "$gw" >/dev/null
 record "drain: $id moved from $gw to $(slot "$id" node) after ${moved_after}s (drainSeconds 20); no new connection failed"

@@ -3,6 +3,7 @@ package dataplane
 import (
 	"context"
 	"encoding/binary"
+	"net/netip"
 	"os/exec"
 	"slices"
 	"strings"
@@ -165,5 +166,45 @@ table ip quiet {
 	must(t, err)
 	if len(found) != 0 {
 		t.Fatalf("mask 0x3f00 conflicts with %v, want none", found)
+	}
+}
+
+// rulesAhead finds the AWS VPC CNI's rules when the agent's sort after them,
+// which sent every steered pod connection to the zone's bootstrap slot, and
+// passes over the local table, destination-only rules, the agent's own and
+// anything that sorts after it.
+func TestRulesAhead(t *testing.T) {
+	rule := func(prio, table int, set func(*netlink.Rule)) netlink.Rule {
+		r := netlink.NewRule()
+		r.Priority, r.Table = prio, table
+		if set != nil {
+			set(r)
+		}
+		return *r
+	}
+	cniMask := uint32(0x80)
+	pod := netip.MustParseAddr("10.0.5.7")
+	rules := []netlink.Rule{
+		rule(0, unix.RT_TABLE_LOCAL, nil),
+		rule(512, unix.RT_TABLE_MAIN, func(r *netlink.Rule) { r.Dst = hostPrefix(pod) }),
+		rule(1024, unix.RT_TABLE_MAIN, func(r *netlink.Rule) { r.Mark, r.Mask = 0x80, &cniMask }),
+		rule(1536, 2, func(r *netlink.Rule) { r.Src = hostPrefix(pod) }),
+		rule(7702, 7717, func(r *netlink.Rule) { r.Mark = 0x10000 }),
+		rule(32766, unix.RT_TABLE_MAIN, nil),
+	}
+	owns := func(t int) bool { return t >= 7700 && t <= 7972 }
+	var got []string
+	for _, r := range rulesAhead(rules, 7700, owns) {
+		got = append(got, describeRule(&r))
+	}
+	want := []string{
+		"rule 1024 (from all fwmark 0x80/0x80 lookup 254)",
+		"rule 1536 (from 10.0.5.7/32 lookup 2)",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("rules ahead of 7700:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if ahead := rulesAhead(rules, DefaultConfig().RulePriority, owns); len(ahead) != 0 {
+		t.Fatalf("the default priority sorts after %s", describeRule(&ahead[0]))
 	}
 }

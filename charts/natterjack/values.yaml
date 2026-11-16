@@ -116,8 +116,12 @@ agent:
   markMask: "0x00ff0000"
   # -- First policy routing table the agent owns.
   routeTableBase: 7700
-  # -- Priority of the agent's policy routing rules.
-  rulePriority: 7700
+  # -- Priority of the agent's policy routing rules; they use this and the
+  # next two. They must sort ahead of any rule that routes pod traffic by its
+  # mark or source, such as the AWS VPC CNI's (1024 and 1536). An agent that
+  # finds such a rule ahead of its own reports its node's data path not
+  # ready and names the rule.
+  rulePriority: 1000
   # -- GENEVE UDP port between nodes. Node security groups must allow it
   # between nodes.
   tunnelPort: 6081

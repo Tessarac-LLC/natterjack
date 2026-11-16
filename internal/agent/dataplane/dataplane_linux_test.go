@@ -786,6 +786,7 @@ func TestTunnel(t *testing.T) {
 
 	case "source":
 		p := pod(t)
+		vpcCNIMarks(t)
 		dp, err := New(cfg, testr.New(t))
 		must(t, err)
 		t.Cleanup(func() { _ = dp.Teardown() })
@@ -882,6 +883,39 @@ func cniMasquerade(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = exec.CommandContext(context.Background(), "nft", "delete", "table", "ip", "cni").Run()
+	})
+}
+
+// vpcCNIMarks installs what the AWS VPC CNI adds for pods: outbound pod
+// connections get connection mark 0x80, restored onto every packet, and a
+// policy routing rule at 1024 sends packets marked 0x80 to the main table.
+// An agent whose rules sort after that one never steers pod traffic: it
+// follows the node's default route instead.
+func vpcCNIMarks(t *testing.T) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(`table ip vpccni {
+	chain mangle {
+		type filter hook prerouting priority mangle; policy accept;
+		iifname "vpod" ct mark & 0x80 == 0x80 meta mark set meta mark | 0x80
+	}
+	chain nat {
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname "vpod" ip daddr != 10.0.0.0/8 ct mark set ct mark | 0x80
+		ct mark & 0x80 == 0x80 meta mark set meta mark | 0x80
+	}
+}
+`)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("install the VPC CNI's marks: %v: %s", err, out)
+	}
+	rule := netlink.NewRule()
+	mask := uint32(0x80)
+	rule.Priority, rule.Table, rule.Mark, rule.Mask, rule.Family = 1024, unix.RT_TABLE_MAIN, 0x80, &mask, unix.AF_INET
+	must(t, netlink.RuleAdd(rule))
+	t.Cleanup(func() {
+		_ = netlink.RuleDel(rule)
+		_ = exec.CommandContext(context.Background(), "nft", "delete", "table", "ip", "vpccni").Run()
 	})
 }
 

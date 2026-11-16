@@ -72,8 +72,10 @@ type Config struct {
 	// TableBase is the first routing table ID the agent owns; it uses
 	// TableBase .. TableBase+2+(MarkMask>>shift).
 	TableBase int
-	// RulePriority is the priority of the agent's policy routing rules. It
-	// must sort after the local table (0) and before main (32766).
+	// RulePriority is the priority of the agent's policy routing rules,
+	// which use RulePriority .. RulePriority+2. They must sort after the
+	// local table (0) and ahead of any rule that routes pod traffic by its
+	// mark or source, such as the AWS VPC CNI's (1024 and 1536).
 	RulePriority int
 	// TunnelPort is the GENEVE UDP port.
 	TunnelPort uint16
@@ -102,7 +104,7 @@ type Config struct {
 // defaults.
 func DefaultConfig() Config {
 	return Config{
-		MarkMask: 0x00ff0000, TableBase: 7700, RulePriority: 7700, TunnelPort: 6081, WireGuardPort: 51871,
+		MarkMask: 0x00ff0000, TableBase: 7700, RulePriority: 1000, TunnelPort: 6081, WireGuardPort: 51871,
 		Link: netip.MustParsePrefix("169.254.73.0/30"), ProbePort: 6086,
 		StateDir: "/run/natterjack", MSS: 1460, Mode: ModeAuto, BPFDir: "/sys/fs/bpf/natterjack",
 	}

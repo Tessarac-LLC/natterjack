@@ -3,6 +3,7 @@ package dataplane
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,8 @@ const markScanEvery = time.Minute
 // routing rules use the mark bits the agent owns. Such a component, for
 // example Calico, which keeps its own marks in 0xffff0000, makes the agent's
 // steering skip or misroute packets without any error, so the clash is
-// reported instead, with the setting that ends it.
+// reported instead, with the setting that ends it. So are policy routing
+// rules that sort ahead of the agent's and would take steered packets.
 func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 	if time.Since(d.marksChecked) < markScanEvery {
 		return d.marksErr
@@ -29,16 +31,70 @@ func (d *Dataplane) checkMarks(c *nftables.Conn) error {
 	if err != nil {
 		return err
 	}
+	rules, err := netlink.RuleList(unix.AF_INET)
+	if err != nil {
+		return fmt.Errorf("list policy routing rules: %w", err)
+	}
+	ahead := rulesAhead(rules, d.cfg.RulePriority, d.ownsTable)
 	d.marksChecked, d.marksErr = time.Now(), nil
+	var errs []error
 	if len(found) > 0 {
 		msgs := make([]string, 0, len(found))
 		for _, f := range found {
 			msgs = append(msgs, f.String())
 		}
-		d.marksErr = fmt.Errorf("other rules on the node use the agent's mark bits 0x%08x, so steering would fail: %s; set agent.markMask to bits none of them use",
-			d.cfg.MarkMask, strings.Join(msgs, "; "))
+		errs = append(errs, fmt.Errorf("other rules on the node use the agent's mark bits 0x%08x, so steering would fail: %s; set agent.markMask to bits none of them use",
+			d.cfg.MarkMask, strings.Join(msgs, "; ")))
 	}
+	if len(ahead) > 0 {
+		msgs := make([]string, 0, len(ahead))
+		for _, r := range ahead {
+			msgs = append(msgs, describeRule(&r))
+		}
+		errs = append(errs, fmt.Errorf("policy routing rules sort ahead of the agent's (priority %d) and can route steered traffic past its gateways: %s; set agent.rulePriority below %d",
+			d.cfg.RulePriority, strings.Join(msgs, "; "), ahead[0].Priority))
+	}
+	d.marksErr = errors.Join(errs...)
 	return d.marksErr
+}
+
+// rulesAhead lists the policy routing rules that sort ahead of the agent's
+// and choose a route by a packet's mark, source or incoming interface. A
+// steered packet that one of them matches never reaches the agent's rules:
+// the AWS VPC CNI, for example, marks every outbound pod connection 0x80
+// and sends such packets to the main table at priority 1024. Rules that
+// only match a destination are left out, since steered destinations are
+// public, as is the lookup of the local table.
+func rulesAhead(rules []netlink.Rule, prio int, ownsTable func(int) bool) []netlink.Rule {
+	var ahead []netlink.Rule
+	for _, r := range rules {
+		if r.Priority >= prio || ownsTable(r.Table) || r.Table == unix.RT_TABLE_LOCAL {
+			continue
+		}
+		if r.Mark != 0 || r.Mask != nil || r.Src != nil || r.IifName != "" {
+			ahead = append(ahead, r)
+		}
+	}
+	slices.SortFunc(ahead, func(a, b netlink.Rule) int { return a.Priority - b.Priority })
+	return ahead
+}
+
+// describeRule names a rule as ip rule prints it.
+func describeRule(r *netlink.Rule) string {
+	sel := "from all"
+	if r.Src != nil {
+		sel = "from " + r.Src.String()
+	}
+	if r.Mark != 0 || r.Mask != nil {
+		sel += fmt.Sprintf(" fwmark %#x", r.Mark)
+		if r.Mask != nil {
+			sel += fmt.Sprintf("/%#x", *r.Mask)
+		}
+	}
+	if r.IifName != "" {
+		sel += " iif " + r.IifName
+	}
+	return fmt.Sprintf("rule %d (%s lookup %d)", r.Priority, sel, r.Table)
 }
 
 // The agent marks packets at mangle priority on the prerouting and output
