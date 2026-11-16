@@ -348,10 +348,11 @@ eventually 60 "steered-b uses every gateway in ${zones[1]}" spread steered-b "${
 record "pod traffic: steered-a from $(from steered-a), steered-b from $(from steered-b); new connections of each spread over every gateway in its zone"
 
 # watch_flows ZONE POD SECONDS: opens a new connection every 200ms and
-# records "<epoch ms> <address or FAIL>" to $work/flows-POD.
+# records "<epoch ms> <address>", or "<epoch ms> FAIL curl=<exit code>", to
+# $work/flows-POD.
 watch_flows() {
 	kubectl -n e2e exec "$2" -- bash -c "end=\$((SECONDS + $3)); while ((SECONDS < end)); do
-		a=\$(curl -fsS --max-time 1 http://$outside_ip/ 2>/dev/null) || a=FAIL; echo \"\$((\${EPOCHREALTIME/./} / 1000)) \${a:-EMPTY}\"; sleep 0.2; done" \
+		a=\$(curl -fsS --max-time 1 http://$outside_ip/ 2>/dev/null) || a=\"FAIL curl=\$?\"; echo \"\$((\${EPOCHREALTIME/./} / 1000)) \${a:-EMPTY}\"; sleep 0.2; done" \
 		>"$work/flows-$2" 2>/dev/null
 }
 # flow_gap POD: the longest run of failed requests, in ms (0 if none).

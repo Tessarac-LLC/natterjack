@@ -229,7 +229,7 @@ Present only on nodes that serve or served a slot.
 | Status and reason | Meaning |
 | --- | --- |
 | True `Serving` | `serving slot <id>` |
-| False `SelfTestPending` | Waiting for the first self-test through the slot. |
+| False `SelfTestPending` | Waiting for three self-tests in a row through the slot, a second apart. |
 | False `SelfTestFailed` | Three self-tests in a row failed; the gateway is out of service. See below. |
 | False `NotServing` | The slot interface has not arrived (`slot interface … is not attached to this node yet`) or is not the expected one. |
 | False `Draining` | Established flows continue; new flows go to other gateways. |
