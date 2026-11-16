@@ -85,7 +85,7 @@ chart-lint: chart-tools ## Lint the chart, validate every rendering, check bad i
 .PHONY: chart-docs
 chart-docs: chart-tools ## Regenerate the chart README's and the site's values reference
 	$(HELM_DOCS) --chart-search-root charts --template-files README.md.gotmpl
-	$(HELM_DOCS) --chart-search-root charts --template-files ../../site/helm-values.md.gotmpl \
+	$(HELM_DOCS) --chart-search-root charts --template-files $(CURDIR)/site/helm-values.md.gotmpl \
 		--output-file ../../site/content/docs/reference/helm-values/_index.md
 
 .PHONY: chart-e2e
