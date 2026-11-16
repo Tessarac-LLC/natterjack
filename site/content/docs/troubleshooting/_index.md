@@ -92,7 +92,7 @@ failing check:
 
 | Reason | Fix |
 |---|---|
-| `security group sg-… allows inbound traffic; a slot's security groups must have no inbound rules` | Remove every inbound rule. A slot accepts no connections. A security group the controller cannot read counts as open. |
+| `security group sg-… allows inbound traffic from outside the VPC; a slot's security groups may admit only the VPC's own IPv4 blocks` | Remove every inbound rule whose source is not an IPv4 CIDR inside one of the VPC's associated blocks: wider CIDRs, IPv6 ranges, prefix lists and security groups. A security group the controller cannot read counts as open. |
 | `the ENI has no security group` | Attach the module's empty security group. |
 | `no Elastic IP is associated with the ENI` | Associate one. The module does this. |
 | `source/destination check is enabled; it must be disabled for a gateway` | Disable it: a gateway forwards traffic that is not its own. |

@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"slices"
 	"sort"
@@ -50,6 +51,7 @@ type EC2 interface {
 	DescribeRouteTables(context.Context, *ec2.DescribeRouteTablesInput, ...func(*ec2.Options)) (*ec2.DescribeRouteTablesOutput, error)
 	DescribeInstances(context.Context, *ec2.DescribeInstancesInput, ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 	DescribeSubnets(context.Context, *ec2.DescribeSubnetsInput, ...func(*ec2.Options)) (*ec2.DescribeSubnetsOutput, error)
+	DescribeVpcs(context.Context, *ec2.DescribeVpcsInput, ...func(*ec2.Options)) (*ec2.DescribeVpcsOutput, error)
 	AttachNetworkInterface(context.Context, *ec2.AttachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.AttachNetworkInterfaceOutput, error)
 	DetachNetworkInterface(context.Context, *ec2.DetachNetworkInterfaceInput, ...func(*ec2.Options)) (*ec2.DetachNetworkInterfaceOutput, error)
 }
@@ -173,7 +175,7 @@ func problems(e *types.NetworkInterface, inbound, igw map[string]bool, cidrs map
 	}
 	for _, g := range e.Groups {
 		if inbound[aws.ToString(g.GroupId)] {
-			out = append(out, fmt.Sprintf("security group %s allows inbound traffic; a slot's security groups must have no inbound rules", aws.ToString(g.GroupId)))
+			out = append(out, fmt.Sprintf("security group %s allows inbound traffic from outside the VPC; a slot's security groups may admit only the VPC's own IPv4 blocks", aws.ToString(g.GroupId)))
 		}
 	}
 	if cidrs[aws.ToString(e.SubnetId)] == "" {
@@ -191,7 +193,10 @@ func hasTag(tags []types.Tag, key, value string) bool {
 	})
 }
 
-// inboundRules reports, per security group, whether it has any inbound rule.
+// inboundRules reports, per security group, whether it admits traffic from
+// anywhere but its VPC's own IPv4 blocks. A bootstrap route sends the VPC's
+// traffic through a slot, and the VPC applies the slot's groups to it, so
+// such a rule is needed; anything wider would expose the gateway.
 func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterface) (map[string]bool, error) {
 	var ids []string
 	for i := range enis {
@@ -204,6 +209,7 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 	if len(ids) == 0 {
 		return out, nil
 	}
+	var withRules []types.SecurityGroup
 	pager := ec2.NewDescribeSecurityGroupsPaginator(p.ec2, &ec2.DescribeSecurityGroupsInput{GroupIds: ids})
 	for pager.HasMorePages() {
 		page, err := pager.NextPage(ctx)
@@ -211,7 +217,10 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 			return nil, fmt.Errorf("describe security groups: %w", err)
 		}
 		for _, g := range page.SecurityGroups {
-			out[aws.ToString(g.GroupId)] = len(g.IpPermissions) > 0
+			out[aws.ToString(g.GroupId)] = false
+			if len(g.IpPermissions) > 0 {
+				withRules = append(withRules, g)
+			}
 		}
 	}
 	for _, id := range ids {
@@ -220,7 +229,68 @@ func (p *Provider) inboundRules(ctx context.Context, enis []types.NetworkInterfa
 			out[id] = true
 		}
 	}
+	if len(withRules) == 0 {
+		return out, nil
+	}
+	blocks, err := p.vpcBlocks(ctx, withRules)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range withRules {
+		out[aws.ToString(g.GroupId)] = !withinVPC(g.IpPermissions, blocks[aws.ToString(g.VpcId)])
+	}
 	return out, nil
+}
+
+// vpcBlocks returns each group's VPC's associated IPv4 blocks.
+func (p *Provider) vpcBlocks(ctx context.Context, groups []types.SecurityGroup) (map[string][]netip.Prefix, error) {
+	var vpcs []string
+	for _, g := range groups {
+		if id := aws.ToString(g.VpcId); id != "" {
+			vpcs = append(vpcs, id)
+		}
+	}
+	out := map[string][]netip.Prefix{}
+	if vpcs = unique(vpcs); len(vpcs) == 0 {
+		return out, nil
+	}
+	pager := ec2.NewDescribeVpcsPaginator(p.ec2, &ec2.DescribeVpcsInput{VpcIds: vpcs})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe vpcs: %w", err)
+		}
+		for _, v := range page.Vpcs {
+			for _, a := range v.CidrBlockAssociationSet {
+				if a.CidrBlockState == nil || a.CidrBlockState.State != types.VpcCidrBlockStateCodeAssociated {
+					continue
+				}
+				if b, err := netip.ParsePrefix(aws.ToString(a.CidrBlock)); err == nil {
+					out[aws.ToString(v.VpcId)] = append(out[aws.ToString(v.VpcId)], b.Masked())
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// withinVPC reports whether every inbound source is an IPv4 CIDR inside one
+// of blocks. IPv6 ranges, prefix lists and group references never are.
+func withinVPC(perms []types.IpPermission, blocks []netip.Prefix) bool {
+	for _, perm := range perms {
+		if len(perm.IpRanges) == 0 || len(perm.Ipv6Ranges) > 0 || len(perm.PrefixListIds) > 0 || len(perm.UserIdGroupPairs) > 0 {
+			return false
+		}
+		for _, r := range perm.IpRanges {
+			src, err := netip.ParsePrefix(aws.ToString(r.CidrIp))
+			if err != nil || !slices.ContainsFunc(blocks, func(b netip.Prefix) bool {
+				return b.Bits() <= src.Bits() && b.Contains(src.Addr())
+			}) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // routes reports which subnets route 0.0.0.0/0 to an internet gateway, and

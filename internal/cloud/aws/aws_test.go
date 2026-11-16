@@ -47,6 +47,7 @@ type fakeEC2 struct {
 	// detachPolls is how many describes a detaching ENI stays "detaching".
 	detachPolls int
 	polls       int
+	vpcCalls    int
 }
 
 func notFound(code string) error { return &smithy.GenericAPIError{Code: code, Message: "not found"} }
@@ -117,6 +118,26 @@ func (f *fakeEC2) DescribeSubnets(_ context.Context, in *ec2.DescribeSubnetsInpu
 	return out, nil
 }
 
+// vpc-1 holds 10.0.0.0/16 and 100.64.0.0/16; 172.20.0.0/16 was removed.
+func (f *fakeEC2) DescribeVpcs(_ context.Context, in *ec2.DescribeVpcsInput, _ ...func(*ec2.Options)) (*ec2.DescribeVpcsOutput, error) {
+	f.vpcCalls++
+	out := &ec2.DescribeVpcsOutput{}
+	for _, id := range in.VpcIds {
+		if id != "vpc-1" {
+			continue
+		}
+		assoc := func(c string, st types.VpcCidrBlockStateCode) types.VpcCidrBlockAssociation {
+			return types.VpcCidrBlockAssociation{CidrBlock: aws.String(c), CidrBlockState: &types.VpcCidrBlockState{State: st}}
+		}
+		out.Vpcs = append(out.Vpcs, types.Vpc{VpcId: aws.String(id), CidrBlock: aws.String("10.0.0.0/16"), CidrBlockAssociationSet: []types.VpcCidrBlockAssociation{
+			assoc("10.0.0.0/16", types.VpcCidrBlockStateCodeAssociated),
+			assoc("100.64.0.0/16", types.VpcCidrBlockStateCodeAssociated),
+			assoc("172.20.0.0/16", types.VpcCidrBlockStateCodeDisassociated),
+		}})
+	}
+	return out, nil
+}
+
 func (f *fakeEC2) DescribeInstances(_ context.Context, in *ec2.DescribeInstancesInput, _ ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error) {
 	r := types.Reservation{}
 	for _, id := range in.InstanceIds {
@@ -178,6 +199,13 @@ func goodENI(id, zone string) *types.NetworkInterface {
 	}
 }
 
+func inbound(id string, perms ...types.IpPermission) types.SecurityGroup {
+	for i := range perms {
+		perms[i].IpProtocol = aws.String("-1")
+	}
+	return types.SecurityGroup{GroupId: aws.String(id), VpcId: aws.String("vpc-1"), IpPermissions: perms}
+}
+
 func newFake(enis ...*types.NetworkInterface) *fakeEC2 {
 	f := &fakeEC2{
 		enis: map[string]*types.NetworkInterface{},
@@ -187,6 +215,17 @@ func newFake(enis ...*types.NetworkInterface) *fakeEC2 {
 				IpProtocol: aws.String("tcp"), FromPort: aws.Int32(22), ToPort: aws.Int32(22),
 				IpRanges: []types.IpRange{{CidrIp: aws.String("0.0.0.0/0")}},
 			}}},
+			// What the Terraform module adds for bootstrap routes.
+			"sg-vpc":       inbound("sg-vpc", types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("10.0.0.0/16")}}}),
+			"sg-secondary": inbound("sg-secondary", types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("10.0.16.0/20")}, {CidrIp: aws.String("100.64.0.0/16")}}}),
+			"sg-wider":     inbound("sg-wider", types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("10.0.0.0/8")}}}),
+			"sg-removed":   inbound("sg-removed", types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("172.20.0.0/24")}}}),
+			"sg-v6":        inbound("sg-v6", types.IpPermission{Ipv6Ranges: []types.Ipv6Range{{CidrIpv6: aws.String("::/0")}}}),
+			"sg-group":     inbound("sg-group", types.IpPermission{UserIdGroupPairs: []types.UserIdGroupPair{{GroupId: aws.String("sg-egress")}}}),
+			"sg-prefix":    inbound("sg-prefix", types.IpPermission{PrefixListIds: []types.PrefixListId{{PrefixListId: aws.String("pl-1")}}}),
+			"sg-mixed": inbound("sg-mixed",
+				types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("10.0.0.0/16")}}},
+				types.IpPermission{IpRanges: []types.IpRange{{CidrIp: aws.String("203.0.113.0/24")}}}),
 		},
 		tables: []types.RouteTable{
 			{
@@ -301,6 +340,12 @@ func TestSafetyChecks(t *testing.T) {
 		{"inbound rule", func(e *types.NetworkInterface) {
 			e.Groups = append(e.Groups, types.GroupIdentifier{GroupId: aws.String("sg-open")})
 		}, "sg-open allows inbound"},
+		{"inbound from the whole private range", group("sg-wider"), "sg-wider allows inbound"},
+		{"inbound from a removed vpc block", group("sg-removed"), "sg-removed allows inbound"},
+		{"inbound over ipv6", group("sg-v6"), "sg-v6 allows inbound"},
+		{"inbound from a security group", group("sg-group"), "sg-group allows inbound"},
+		{"inbound from a prefix list", group("sg-prefix"), "sg-prefix allows inbound"},
+		{"inbound from the vpc and outside it", group("sg-mixed"), "sg-mixed allows inbound"},
 		{"invisible group", func(e *types.NetworkInterface) {
 			e.Groups = []types.GroupIdentifier{{GroupId: aws.String("sg-missing")}}
 		}, "sg-missing allows inbound"},
@@ -323,6 +368,34 @@ func TestSafetyChecks(t *testing.T) {
 				t.Fatalf("problems %q do not mention %q", s.Problems, c.want)
 			}
 		})
+	}
+}
+
+func group(id string) func(*types.NetworkInterface) {
+	return func(e *types.NetworkInterface) {
+		e.Groups = append(e.Groups, types.GroupIdentifier{GroupId: aws.String(id)})
+	}
+}
+
+// A bootstrap route sends the VPC's own traffic through a slot, and the VPC
+// applies the slot's security groups to it: inbound rules from the VPC's own
+// IPv4 blocks keep the slot usable.
+func TestInboundFromTheVPCIsAllowed(t *testing.T) {
+	for _, id := range []string{"sg-vpc", "sg-secondary"} {
+		t.Run(id, func(t *testing.T) {
+			e := goodENI("eni-a", "us-east-2a")
+			group(id)(e)
+			if s := slots(t, newFake(e))["eni-a"]; !s.Usable() {
+				t.Fatalf("a slot admitting only its VPC must be usable: %v", s.Problems)
+			}
+		})
+	}
+	// Without inbound rules the VPC is never looked up, so the call needs
+	// no permission until a cluster uses bootstrap routes.
+	f := newFake(goodENI("eni-a", "us-east-2a"))
+	slots(t, f)
+	if f.vpcCalls != 0 {
+		t.Fatalf("DescribeVpcs called %d times with no inbound rules", f.vpcCalls)
 	}
 }
 

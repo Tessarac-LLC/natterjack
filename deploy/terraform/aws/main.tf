@@ -31,9 +31,14 @@ locals {
 
 # --- Slots -------------------------------------------------------------------
 
+data "aws_vpc" "slot" {
+  count = length(var.bootstrap_route_table_ids) > 0 && var.bootstrap_source_cidrs == null ? 1 : 0
+  id    = one(local.vpc_ids)
+}
+
 resource "aws_security_group" "slot" {
   name_prefix = "natterjack-${var.cluster_name}-slot-"
-  description = "Natterjack egress slots: no inbound rules, so only replies to outbound flows return."
+  description = "Natterjack egress slots: only replies from the internet return."
   vpc_id      = one(local.vpc_ids)
   tags        = merge(var.tags, { Name = "natterjack-${var.cluster_name}-slot" })
 
@@ -100,6 +105,20 @@ resource "aws_route" "bootstrap" {
   route_table_id         = each.value
   destination_cidr_block = "0.0.0.0/0"
   network_interface_id   = aws_network_interface.slot["${each.key}/0"].id
+}
+
+# The VPC applies the slot's security group to traffic a bootstrap route sends
+# through it, as for any NAT instance. Only private sources reach it that way;
+# the gateway forwards them to the internet and nowhere else. Counted, not
+# keyed by CIDR, so it plans before a new VPC exists.
+resource "aws_vpc_security_group_ingress_rule" "slot_routed" {
+  count = length(var.bootstrap_route_table_ids) > 0 ? (var.bootstrap_source_cidrs == null ? 1 : length(var.bootstrap_source_cidrs)) : 0
+
+  security_group_id = aws_security_group.slot.id
+  description       = "Traffic routed to the slot by a bootstrap route."
+  ip_protocol       = "-1"
+  cidr_ipv4         = var.bootstrap_source_cidrs == null ? data.aws_vpc.slot[0].cidr_block : var.bootstrap_source_cidrs[count.index]
+  tags              = var.tags
 }
 
 resource "aws_vpc_security_group_ingress_rule" "tunnel" {

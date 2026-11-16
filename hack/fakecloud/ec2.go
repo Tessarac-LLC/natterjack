@@ -53,10 +53,13 @@ type Subnet struct {
 	NoInternet bool `json:"noInternet,omitempty"`
 }
 
-// SecurityGroup is a security group; Inbound gives it an inbound rule.
+// SecurityGroup is a security group. Inbound gives it an inbound rule from
+// anywhere; InboundFromVPC one from the VPC's own blocks, as a bootstrap
+// route needs.
 type SecurityGroup struct {
-	ID      string `json:"id"`
-	Inbound bool   `json:"inbound,omitempty"`
+	ID             string `json:"id"`
+	Inbound        bool   `json:"inbound,omitempty"`
+	InboundFromVPC bool   `json:"inboundFromVPC,omitempty"`
 }
 
 // Slot is an ENI. Its fields default to a slot that passes every safety check.
@@ -236,6 +239,8 @@ func (f *EC2) handle(action string, form map[string][]string) (any, error) {
 		return f.describeInstances(q)
 	case "DescribeSubnets":
 		return f.describeSubnets(q)
+	case "DescribeVpcs":
+		return f.describeVPCs(q)
 	case "AttachNetworkInterface":
 		return f.attach(q)
 	case "DetachNetworkInterface":
@@ -423,8 +428,12 @@ func (f *EC2) matches(s *Slot, filters map[string][]string) (bool, error) {
 }
 
 func (f *EC2) describeGroups(q query) (any, error) {
+	type rangeXML struct {
+		CIDR string `xml:"cidrIp"`
+	}
 	type permXML struct {
-		Protocol string `xml:"ipProtocol"`
+		Protocol string     `xml:"ipProtocol"`
+		Ranges   []rangeXML `xml:"ipRanges>item"`
 	}
 	type sgXML struct {
 		ID    string    `xml:"groupId"`
@@ -439,7 +448,14 @@ func (f *EC2) describeGroups(q query) (any, error) {
 		}
 		g := sgXML{ID: id, VPC: f.cfg.VPC}
 		if f.cfg.SecurityGroups[i].Inbound {
-			g.Perms = []permXML{{"tcp"}}
+			g.Perms = append(g.Perms, permXML{"tcp", []rangeXML{{"0.0.0.0/0"}}})
+		}
+		if f.cfg.SecurityGroups[i].InboundFromVPC {
+			p := permXML{Protocol: "-1"}
+			for _, sn := range f.cfg.Subnets {
+				p.Ranges = append(p.Ranges, rangeXML{sn.CIDR})
+			}
+			g.Perms = append(g.Perms, p)
 		}
 		out = append(out, g)
 	}
@@ -585,6 +601,38 @@ func (f *EC2) describeSubnets(q query) (any, error) {
 		Xmlns     string      `xml:"xmlns,attr"`
 		RequestID string      `xml:"requestId"`
 		Items     []subnetXML `xml:"subnetSet>item"`
+	}{Xmlns: xmlns, RequestID: f.requestID(), Items: out}, nil
+}
+
+// describeVPCs gives the fake VPC its subnets' blocks.
+func (f *EC2) describeVPCs(q query) (any, error) {
+	type stateXML struct {
+		State string `xml:"state"`
+	}
+	type assocXML struct {
+		CIDR  string   `xml:"cidrBlock"`
+		State stateXML `xml:"cidrBlockState"`
+	}
+	type vpcXML struct {
+		ID     string     `xml:"vpcId"`
+		Blocks []assocXML `xml:"cidrBlockAssociationSet>item"`
+	}
+	var out []vpcXML
+	for _, id := range q.list("VpcId") {
+		if id != f.cfg.VPC {
+			return nil, notFound("InvalidVpcID.NotFound", id)
+		}
+		v := vpcXML{ID: id}
+		for _, sn := range f.cfg.Subnets {
+			v.Blocks = append(v.Blocks, assocXML{sn.CIDR, stateXML{"associated"}})
+		}
+		out = append(out, v)
+	}
+	return struct {
+		XMLName   xml.Name `xml:"DescribeVpcsResponse"`
+		Xmlns     string   `xml:"xmlns,attr"`
+		RequestID string   `xml:"requestId"`
+		Items     []vpcXML `xml:"vpcSet>item"`
 	}{Xmlns: xmlns, RequestID: f.requestID(), Items: out}, nil
 }
 

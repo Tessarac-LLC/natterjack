@@ -301,7 +301,7 @@ value. The controller never writes tags.
 
 | Cloud | Slot | How the controller moves it | Node-traffic bootstrap route |
 | --- | --- | --- | --- |
-| AWS | A secondary ENI in a public subnet of the zone, with an Elastic IP associated in IaC, source/destination check disabled, a security group with no inbound rules | `AttachNetworkInterface` / `DetachNetworkInterface`. The Elastic IP is a property of the ENI and moves with it | Private subnet route `0.0.0.0/0` to the ENI, declared in IaC. It stays valid when the ENI moves, so the route table never changes |
+| AWS | A secondary ENI in a public subnet of the zone, with an Elastic IP associated in IaC, source/destination check disabled, a security group that admits at most the VPC's own IPv4 blocks (AWS filters routed traffic by the ENI's groups, so a bootstrap route needs them) | `AttachNetworkInterface` / `DetachNetworkInterface`. The Elastic IP is a property of the ENI and moves with it | Private subnet route `0.0.0.0/0` to the ENI, declared in IaC. It stays valid when the ENI moves, so the route table never changes |
 | OCI | A secondary VNIC subnet's secondary private IP with a reserved public IP, VNIC set to skip the source/destination check | Move the private IP between VNICs in the same subnet; the reserved public IP follows it. Each gateway node carries a VNIC in the public subnet | Route rule to the private IP, declared in IaC, unchanged on failover |
 | GCP | A reserved static external IPv4 address, labelled | Remove and add the access config on the gateway VM's NIC. GCP has no public-subnet requirement | None. GCP does not support GKE nodes as backends of an internal load balancer used as a route next hop, so node traffic is steered by the agent only. Before the agent runs, nodes rely on Private Google Access and an in-VPC registry |
 | Azure | A Standard static public IPv4, tagged | Associate and disassociate on the gateway node's NIC IP configuration | User-defined route to an internal load balancer with HA ports in front of gateway nodes, if section 12 item 1 confirms it works for AKS nodes; otherwise agent steering only, as on GCP |
@@ -411,7 +411,9 @@ interface never returns to the host namespace.
 
 The controller refuses (quarantines) a slot and reports the reason when:
 
-- its security group or equivalent has any inbound rule;
+- its security group or equivalent admits any source outside the VPC's own
+  IPv4 blocks (on AWS a route through the ENI is filtered by its groups, so
+  the VPC's blocks must be allowed for bootstrap routes; nothing wider is);
 - its subnet has no route to an internet gateway (AWS, OCI);
 - it has no public IP;
 - source/destination checking or IP forwarding is not set as required;

@@ -25,7 +25,7 @@ creates, for one cluster:
 
 - `slots_per_subnet` slots (default 2) in each public subnet you give: an ENI
   with an Elastic IP, the source/destination check off, the Natterjack tags,
-  and a security group with no inbound rules;
+  and a security group that admits nothing from the internet;
 - the controller's IAM role, which may attach and detach only this cluster's
   slots, and only on this cluster's instances;
 - optionally, the rule that lets the agent tunnel (UDP 6081) and WireGuard
@@ -149,6 +149,10 @@ gateway:
 ```hcl
   bootstrap_route_table_ids = zipmap(module.vpc.azs, module.vpc.private_route_table_ids)
 ```
+
+AWS filters traffic routed through an ENI by the ENI's security groups, so
+the module then lets the slots admit the VPC's primary CIDR. If nodes or pods
+use a secondary CIDR, list every source in `bootstrap_source_cidrs`.
 
 The route names the ENI, so it stays valid when the controller moves the slot
 to another node. While that slot has no gateway, for instance during its

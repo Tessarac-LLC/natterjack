@@ -20,6 +20,6 @@ output "public_ips" {
 }
 
 output "slot_security_group_id" {
-  description = "Security group on every slot. It has no inbound rules; adding one makes the controller quarantine the slots."
+  description = "Security group on every slot. It admits only the bootstrap sources, if any; a rule from outside the VPC makes the controller quarantine the slots."
   value       = aws_security_group.slot.id
 }

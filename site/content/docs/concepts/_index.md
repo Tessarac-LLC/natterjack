@@ -8,8 +8,8 @@ description: Pools, slots, gateways and policies, and how traffic finds its way 
 
 An *egress slot* is a network interface your infrastructure-as-code created
 for Natterjack. On AWS it is an ENI in a public subnet with its own Elastic
-IP, the source/destination check turned off, and a security group with no
-inbound rules. It carries three tags:
+IP, the source/destination check turned off, and a security group that admits
+nothing from outside the VPC. It carries three tags:
 
 | Tag | Value |
 | --- | --- |
