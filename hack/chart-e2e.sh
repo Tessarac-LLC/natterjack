@@ -262,7 +262,7 @@ done
 for p in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o name); do
 	kubectl -n "$ns" logs -f "$p" >"$work/${p#pod/}.log" 2>&1 &
 done
-helm uninstall "$release" -n "$ns" --wait --timeout 120s
+helm uninstall "$release" -n "$ns" --wait --cascade foreground --timeout 120s
 # Helm waits for the objects it deleted, not for the pods the garbage
 # collector removes after them; an agent pod is still running its cleanup.
 for _ in $(seq 60); do

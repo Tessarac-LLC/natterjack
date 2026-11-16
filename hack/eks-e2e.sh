@@ -742,7 +742,7 @@ kubectl delete clusteregresspolicy nodes >/dev/null
 kubectl delete egresspolicy -n e2e egress >/dev/null
 kubectl delete egresspool default --wait=true --timeout=300s >/dev/null || fail "the pool was not deleted"
 eventually 300 "every slot detached once the pool is gone" detached
-helm uninstall "$release" -n "$ns" --wait --timeout 300s --debug >"$work/uninstall.log" 2>&1 ||
+helm uninstall "$release" -n "$ns" --wait --cascade foreground --timeout 300s --debug >"$work/uninstall.log" 2>&1 ||
 	fail "uninstall failed: $(grep -iE 'error|fail' "$work/uninstall.log" | tail -n 20)"
 for n in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
 	left="$(ssm "$(node_instance "$n")" "nft list tables; ip -br link; ip rule" | grep -E 'natterjack|nj(gw|tun|wg|d0)' || true)"

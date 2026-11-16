@@ -226,9 +226,10 @@ kubectl delete egresspools --all
 aws ec2 describe-network-interfaces \
   --filters Name=tag:natterjack.io/cluster,Values=prod-east \
   --query 'NetworkInterfaces[].[NetworkInterfaceId,Status]' --output text
-helm uninstall natterjack --namespace natterjack --wait
+helm uninstall natterjack --namespace natterjack --wait --cascade foreground
 ```
 
 Every slot shows `available` once detached. The agents remove every kernel
-object they created. The CRDs stay unless the release was installed with
+object they created as they stop; `--cascade foreground` makes the uninstall
+wait for them, not just for the DaemonSet. The CRDs stay unless the release was installed with
 `crds.keep=false`.
