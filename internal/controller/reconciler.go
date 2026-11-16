@@ -80,6 +80,9 @@ type Reconciler struct {
 	AgentSelector labels.Selector
 	// ServiceAccount the controller runs as, named in credential errors.
 	ServiceAccount string
+	// IdentityHint, when set, is added to cloud errors: why this pod may
+	// have no credentials and what to do.
+	IdentityHint string
 	// Resync is how often the cloud is re-read when nothing in the cluster
 	// changes.
 	Resync time.Duration
@@ -592,8 +595,12 @@ func (r *Reconciler) avoidNode(node, reason string, now time.Time) {
 // ServiceAccount.
 func (r *Reconciler) cloudError(op string, err error) error {
 	cloudErrors.WithLabelValues(strings.Fields(op)[0]).Inc()
-	return fmt.Errorf("%s: %w (the controller authenticates as system:serviceaccount:%s:%s; the cloud role must trust that subject and carry the Natterjack policy)",
+	err = fmt.Errorf("%s: %w (the controller authenticates as system:serviceaccount:%s:%s; the cloud role must trust that subject and carry the Natterjack policy)",
 		op, err, r.Namespace, r.ServiceAccount)
+	if r.IdentityHint != "" {
+		err = fmt.Errorf("%w (%s)", err, r.IdentityHint)
+	}
+	return err
 }
 
 // Health reports the last cloud error to the readiness probe.

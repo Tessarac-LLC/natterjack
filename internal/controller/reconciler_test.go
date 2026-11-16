@@ -444,6 +444,24 @@ func TestAgentRolloutKeepsTheSlot(t *testing.T) {
 	}
 }
 
+func TestCloudErrorCarriesTheIdentityHint(t *testing.T) {
+	h := newHarness(t, "hint")
+	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "hint"}})
+	h.r.IdentityHint = "this pod has no workload identity"
+	h.cloud.failNext = errors.New("no EC2 IMDS role found")
+	_, err := h.r.Reconcile(h.ctx, request)
+	if err == nil || !strings.Contains(err.Error(), "no EC2 IMDS role found") || !strings.HasSuffix(err.Error(), "(this pod has no workload identity)") {
+		t.Fatalf("error %v", err)
+	}
+	p := &v1.EgressPool{}
+	if err := k8s.Get(h.ctx, client.ObjectKey{Name: "hint"}, p); err != nil {
+		t.Fatal(err)
+	}
+	if c := meta.FindStatusCondition(p.Status.Conditions, v1.ConditionCloudAccess); c == nil || !strings.Contains(c.Message, "no workload identity") {
+		t.Fatalf("cloud access condition %+v lacks the hint", c)
+	}
+}
+
 func TestCloudErrorNamesTheIdentity(t *testing.T) {
 	h := newHarness(t, "errors")
 	h.create(&v1.EgressPool{ObjectMeta: metav1.ObjectMeta{Name: "errors"}})

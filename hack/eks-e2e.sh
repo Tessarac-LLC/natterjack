@@ -414,6 +414,14 @@ gap="$(flow_gap steered-a)"
 flows_in_zone steered-a "${zones[0]}" || fail "a connection left outside ${zones[0]} during the drain"
 kubectl uncordon "$gw" >/dev/null
 record "drain: $id moved from $gw to $(slot "$id" node) after ${moved_after}s (drainSeconds 20); no new connection failed"
+if ((moved_after > 90)); then
+  # EC2 waits for the guest to release the interface; keep what the guest
+  # said about it while the node still exists.
+  aws ec2 get-console-output --instance-id "$(node_instance "$gw")" --latest --output text \
+    --query Output >"$OUT/drain-console-$gw.txt" 2>&1 || true
+  kubectl get events -A --field-selector involvedObject.kind=EgressPool -o wide >"$OUT/drain-events.txt" 2>&1 || true
+  record "drain: the detach took $((moved_after - 20))s past the drain window; console output in drain-console-$gw.txt"
+fi
 
 step "interface limit"
 # The zone's spare node is filled to its interface limit with extra ENIs,
@@ -543,11 +551,21 @@ record "slot deleted: Terraform recreated it and it became active"
 step "workload identity broken"
 assoc="$(aws eks list-pod-identity-associations --cluster-name "$cluster" --namespace "$ns" --query 'associations[0].associationId' --output text)"
 aws eks delete-pod-identity-association --cluster-name "$cluster" --association-id "$assoc" >/dev/null
-kubectl -n "$ns" rollout restart "deploy/$deploy" >/dev/null
 cloud_access() { kubectl get egresspool default -o jsonpath='{.status.conditions[?(@.type=="CloudAccess")].status}'; }
+# New pods get no credentials and are not ready, so a rollout stops while
+# the running replicas keep the credentials they already hold.
+kubectl -n "$ns" rollout restart "deploy/$deploy" >/dev/null
+sleep 90
+kubectl -n "$ns" rollout status "deploy/$deploy" --timeout=1s >/dev/null 2>&1 &&
+  fail "a rollout of controller pods without credentials completed"
+[[ "$(cloud_access)" == True ]] || fail "running controller replicas lost cloud access to a stalled rollout"
+record "identity broken: a rollout without identity stalled; the running replicas kept cloud access"
+# Replacing the pods outright leaves none with credentials.
+kubectl -n "$ns" delete pods -l app.kubernetes.io/component=controller --wait=false >/dev/null
 denied() { [[ "$(cloud_access)" == False ]]; }
 eventually 300 "CloudAccess false" denied
 why="$(kubectl get egresspool default -o jsonpath='{.status.conditions[?(@.type=="CloudAccess")].message}')"
+[[ "$why" == *"this pod has no workload identity"* ]] || fail "CloudAccess does not say the pod has no workload identity: $why"
 record "identity broken: CloudAccess False: $why"
 node_steered steered-a "${zones[0]}" || fail "traffic stopped while the controller had no cloud access"
 tf_apply

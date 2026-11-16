@@ -127,6 +127,7 @@ func run() error {
 	}
 
 	health := &controller.Health{}
+	hint := identityHint()
 	r := &controller.Reconciler{
 		Client:         mgr.GetClient(),
 		Provider:       awsprovider.New(ec2.NewFromConfig(awsCfg), *clusterName),
@@ -135,6 +136,7 @@ func run() error {
 		Namespace:      *namespace,
 		AgentSelector:  sel,
 		ServiceAccount: *serviceAccount,
+		IdentityHint:   hint,
 		Resync:         *resync,
 		Health:         health,
 		Now:            time.Now,
@@ -154,7 +156,10 @@ func run() error {
 	identity := &controller.IdentityWatch{
 		Retrieve: func(ctx context.Context) error {
 			if _, err := awsCfg.Credentials.Retrieve(ctx); err != nil {
-				return credentialsError(err)
+				if hint != "" {
+					return fmt.Errorf("%w (%s)", err, hint)
+				}
+				return fmt.Errorf("retrieve credentials: %w", err)
 			}
 			return nil
 		},
@@ -173,16 +178,16 @@ func run() error {
 	return start(ctx, mgr)
 }
 
-// credentialsError says when the pod was given no workload identity at all,
-// which happens to a pod created before its EKS Pod Identity association or
-// IRSA annotation: the credentials are injected when the pod is admitted.
-func credentialsError(err error) error {
+// identityHint explains a pod given no workload identity at all, which
+// happens to a pod created before its EKS Pod Identity association or IRSA
+// annotation: the credentials are injected when the pod is admitted.
+func identityHint() string {
 	for _, v := range []string{"AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ACCESS_KEY_ID"} {
 		if os.Getenv(v) != "" {
-			return err
+			return ""
 		}
 	}
-	return fmt.Errorf("%w (this pod has no workload identity: if the Pod Identity association or IRSA annotation was created after the pod, restart the controller with kubectl rollout restart)", err)
+	return "this pod has no workload identity: if the Pod Identity association or IRSA annotation was created after the pod, restart the controller with kubectl rollout restart"
 }
 
 func start(ctx context.Context, mgr ctrl.Manager) error {
