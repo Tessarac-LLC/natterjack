@@ -55,11 +55,22 @@ netshoot=docker.io/nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da252
 pullable=docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
 
 # What a failed step leaves behind is undone on exit, so the cluster can
-# run the suite again: filler interfaces and cordoned nodes.
+# run the suite again: filler interfaces, cordoned nodes and the attack's
+# inbound rule. Terraform does not see a rule added outside it.
 fillers=()
 cordoned=()
+revoke_attack_rules() {
+	local ids
+	[[ -n "${slot_sg:-}" ]] || return 0
+	ids="$(aws ec2 describe-security-group-rules --filters "Name=group-id,Values=$slot_sg" \
+		--query "SecurityGroupRules[?Description=='natterjack e2e attack'].SecurityGroupRuleId" --output text 2>/dev/null)" || return 0
+	[[ -z "$ids" || "$ids" == None ]] && return 0
+	# shellcheck disable=SC2086 # one ID per word
+	aws ec2 revoke-security-group-ingress --group-id "$slot_sg" --security-group-rule-ids $ids >/dev/null 2>&1 || true
+}
 cleanup() {
 	local eni att node
+	revoke_attack_rules
 	for eni in "${fillers[@]}"; do
 		att="$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" --query 'NetworkInterfaces[0].Attachment.AttachmentId' --output text 2>/dev/null)" || continue
 		[[ "$att" == None ]] || aws ec2 detach-network-interface --attachment-id "$att" --force >/dev/null 2>&1 || true
@@ -161,6 +172,7 @@ step "cluster $cluster in $region"
 # declares.
 tf_apply
 refresh_outputs
+revoke_attack_rules
 aws eks update-kubeconfig --name "$cluster" --kubeconfig "$KUBECONFIG" >/dev/null
 kubectl get nodes -L topology.kubernetes.io/zone,kubernetes.io/arch,node.kubernetes.io/instance-type
 nodes_ready() { (($(kubectl get nodes --no-headers | grep -cw Ready) >= 8)); }
