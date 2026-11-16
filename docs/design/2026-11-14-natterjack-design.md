@@ -128,8 +128,8 @@ with its node and zone, comes from Kubernetes itself with no extra objects.
 The gateway agent reports that it carries traffic through a pod condition,
 `natterjack.io/gateway-ready`, which it patches on its own pod's status. The
 condition is true only once the slot interface is in the isolated namespace
-with its address and routes, and a self-test through the slot has passed since
-serving began. Its message names the slot (`serving slot <id>`); the
+with its address and routes, and three self-tests in a row through the slot,
+a second apart, have passed since serving began. Its message names the slot (`serving slot <id>`); the
 controller and every agent count the condition only when that slot matches
 the pod's current assignment, so a condition left over from an earlier slot
 never vouches for a new one. A custom condition rather than a pod readiness

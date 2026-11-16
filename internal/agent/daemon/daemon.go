@@ -73,6 +73,12 @@ const (
 	// serving gateway out of service. One failure is often the test service.
 	selfTestFailures = 3
 	selfTestTimeout  = 10 * time.Second
+	// selfTestSettle is how many self-tests in a row, selfTestSettleEvery
+	// apart, a slot must pass before its gateway takes new flows. A freshly
+	// attached interface can pass once while the cloud is still settling
+	// its attachment and then drop the next flow.
+	selfTestSettle      = 3
+	selfTestSettleEvery = time.Second
 	// gatewayHold is how long a gateway stays in use while its agent
 	// restarts; longer than the controller's grace for the same restart.
 	gatewayHold = 90 * time.Second
@@ -129,7 +135,8 @@ type selfTest struct {
 	key      string // slot and public IP under test; empty when idle
 	cancel   context.CancelFunc
 	done     chan struct{}
-	passed   bool // has passed since the key was set
+	passed   bool // has passed selfTestSettle times in a row since the key was set
+	passes   int  // consecutive passes
 	failures int  // consecutive failures
 	err      error
 }
@@ -408,7 +415,7 @@ func (a *Agent) gatewayCondition(role *agent.GatewayRole, st dataplane.Status) (
 	case failures >= selfTestFailures || (!passed && err != nil):
 		return corev1.ConditionFalse, "SelfTestFailed", err.Error()
 	case !passed:
-		return corev1.ConditionFalse, v1.ReasonSelfTestPending, "waiting for the first self-test through the slot"
+		return corev1.ConditionFalse, v1.ReasonSelfTestPending, fmt.Sprintf("waiting for %d self-tests in a row through the slot", selfTestSettle)
 	case role.Draining:
 		return corev1.ConditionFalse, "Draining", "established flows continue; new flows go to other gateways"
 	}
@@ -478,8 +485,6 @@ func (a *Agent) stopSelfTest() {
 
 func (a *Agent) selfTestLoop(ctx context.Context, key string, public netip.Addr, done chan struct{}) {
 	defer close(done)
-	tick := time.NewTicker(a.SelfTestInterval)
-	defer tick.Stop()
 	for {
 		tctx, cancel := context.WithTimeout(ctx, selfTestTimeout)
 		err := a.SelfTest(tctx, a.Dataplane.DialGateway, a.SelfTestURL, public)
@@ -494,15 +499,24 @@ func (a *Agent) selfTestLoop(ctx context.Context, key string, public netip.Addr,
 		}
 		before := a.test.passed && a.test.failures < selfTestFailures
 		if err == nil {
-			a.test.passed, a.test.failures, a.test.err = true, 0, nil
+			a.test.passes++
+			a.test.failures, a.test.err = 0, nil
+			if a.test.passes >= selfTestSettle {
+				a.test.passed = true
+			}
 		} else {
 			selfTestFailuresTotal.Inc()
+			a.test.passes = 0
 			a.test.failures++
 			a.test.err = err
 			a.Log.Error(err, "self-test through the slot failed", "consecutive", a.test.failures)
 		}
 		after := a.test.passed && a.test.failures < selfTestFailures
 		first := a.test.failures == 1 && !a.test.passed
+		every := a.SelfTestInterval
+		if !a.test.passed && every > selfTestSettleEvery {
+			every = selfTestSettleEvery
+		}
 		a.mu.Unlock()
 		if before != after || first {
 			select {
@@ -513,7 +527,7 @@ func (a *Agent) selfTestLoop(ctx context.Context, key string, public netip.Addr,
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-time.After(every):
 		}
 	}
 }

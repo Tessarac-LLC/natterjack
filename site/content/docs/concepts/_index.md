@@ -36,8 +36,10 @@ slot. Gateways are ordinary nodes: Natterjack adds no instances.
 Before a gateway takes traffic, its agent sends a request through the slot
 to a service that echoes the caller's public address
 (`https://checkip.amazonaws.com` by default) and checks that the answer is
-the slot's address. Only then does it set the `natterjack.io/gateway-ready`
-condition on its own pod. The self-test repeats every 30 seconds while the
+the slot's address. Once three tests in a row, a second apart, have passed,
+it sets the `natterjack.io/gateway-ready` condition on its own pod: a freshly
+attached interface can answer once while the cloud is still settling the
+attachment. The self-test repeats every 30 seconds while the
 gateway serves, and three failures in a row take the gateway out of
 service.
 
@@ -192,7 +194,7 @@ failed node not ready, the controller detaches the slot and attaches it to
 another eligible node in the same zone. That is about 50 seconds with
 Kubernetes' default node-monitor grace period. Traffic returns to the zone,
 and to the same public address, as soon as the new gateway passes its
-self-test.
+self-tests.
 
 A planned disruption is gentler. When a gateway node is cordoned, or tainted
 for removal by Karpenter, the cluster autoscaler, the AWS Node Termination

@@ -116,7 +116,7 @@ func starting(p *corev1.Pod, slot string) bool {
 			continue
 		}
 		// Serving the slot before the controller has labeled the pod, or
-		// waiting for its first self-test through it.
+		// waiting for its self-tests through it to settle.
 		return (c.Status == corev1.ConditionTrue && c.Message == v1.GatewayReadyMessage(slot)) || c.Reason == v1.ReasonSelfTestPending
 	}
 	return true

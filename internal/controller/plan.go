@@ -72,7 +72,7 @@ type Agent struct {
 	// controller writes it again.
 	Serves string
 	// Pending reports whether the agent has yet to say whether it serves:
-	// no gateway condition yet, or waiting for its first self-test.
+	// no gateway condition yet, or waiting for its self-tests to settle.
 	Pending bool
 	// DrainStarted is when the controller asked this gateway to drain.
 	DrainStarted time.Time
