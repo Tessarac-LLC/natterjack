@@ -747,6 +747,24 @@ step "throughput"
 # Through a gateway of each instance type in the cluster, from a pod on
 # another node in the zone, to "outside".
 : >"$OUT/bench.json.tmp"
+# iperf_done NAME: whether the bench pod's iperf3 run NAME has finished,
+# with a result or an error; copies its report to $work.
+iperf_done() {
+	kubectl -n e2e exec bench -- cat "/tmp/$1.json" >"$work/$1.json" 2>/dev/null &&
+		jq -e '.error // .end.sum_received.bits_per_second | values' "$work/$1.json" >/dev/null 2>&1
+}
+# iperf NAME ARGS...: runs iperf3 ARGS in the bench pod, detached from the
+# exec session, and prints the bits per second received. A stream held open
+# through the API server for the whole run can be reset, losing the result.
+iperf() {
+	local name="$1"
+	shift
+	kubectl -n e2e exec bench -- bash -c "rm -f /tmp/$name.json; nohup iperf3 $* -J --logfile /tmp/$name.json </dev/null >/dev/null 2>&1 &" >/dev/null ||
+		fail "could not start iperf3 $name"
+	eventually 120 "iperf3 $name finished" iperf_done "$name"
+	jq -e '.end.sum_received.bits_per_second | numbers' "$work/$name.json" ||
+		fail "iperf3 $name failed: $(jq -r '.error // "no result"' "$work/$name.json")"
+}
 for arch in amd64 arm64; do
 	kubectl patch egresspool default --type=merge -p "{\"spec\":{\"gatewayNodeSelector\":{\"$role\":\"gateway\",\"kubernetes.io/arch\":\"$arch\"}}}" >/dev/null
 	on_arch() {
@@ -764,8 +782,8 @@ for arch in amd64 arm64; do
 	pod bench "$srcn" yes
 	kubectl -n e2e wait pod/bench --for=condition=Ready --timeout=300s >/dev/null || fail "bench pod did not start"
 	eventually 60 "bench leaves through $zone" node_steered bench "$zone"
-	up="$(kubectl -n e2e exec bench -- iperf3 -c "$outside_ip" -P 8 -t 20 -J | jq '.end.sum_received.bits_per_second')"
-	down="$(kubectl -n e2e exec bench -- iperf3 -c "$outside_ip" -P 8 -t 20 -R -J | jq '.end.sum_received.bits_per_second')"
+	up="$(iperf "up-$arch" -c "$outside_ip" -P 8 -t 20)"
+	down="$(iperf "down-$arch" -c "$outside_ip" -P 8 -t 20 -R)"
 	jq -n --arg type "$type" --arg arch "$arch" --argjson up "$up" --argjson down "$down" \
 		'{gateway: $type, arch: $arch, egress_gbps: ($up / 1e9 * 100 | round / 100), ingress_gbps: ($down / 1e9 * 100 | round / 100)}' >>"$OUT/bench.json.tmp"
 	record "throughput through a $type gateway: $(tail -n 6 "$OUT/bench.json.tmp" | jq -c . 2>/dev/null || true)"
