@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1 "github.com/Tessarac-LLC/natterjack/api/v1alpha1"
 )
@@ -32,12 +33,19 @@ import (
 // writes one. Without the hold every source would move the gateway's flows
 // elsewhere and back again. Probes still decide liveness throughout.
 //
+// An agent that itself started while a gateway restarted never saw that
+// gateway serve. It takes the controller's word instead: the controller
+// keeps a restarting gateway's slot active on its node.
+//
 // The hold ends when the node's new agent reports anything other than
 // starting up on the same slot, when the slot is drained or reassigned, when
 // the node goes, or after For.
 type Hold struct {
 	For  time.Duration
 	last map[string]held // by node name
+	// from the pools' status, by node name: the slot whose hold was taken,
+	// so an ended hold does not come back while the slot stays active.
+	fromPool map[string]string
 }
 
 type held struct {
@@ -51,6 +59,7 @@ func (h *Hold) Apply(s *Snapshot, now time.Time) time.Duration {
 	var next time.Duration
 	if h.last == nil {
 		h.last = map[string]held{}
+		h.fromPool = map[string]string{}
 	}
 	nodes := map[string]bool{}
 	for i := range s.Nodes {
@@ -68,6 +77,22 @@ func (h *Hold) Apply(s *Snapshot, now time.Time) time.Duration {
 		if slot := slotOf(p); slot != "" && p.DeletionTimestamp == nil && v1.GatewayReady(p, slot) && p.Annotations[v1.AnnotationDrainStarted] == "" {
 			up[p.Spec.NodeName] = true
 			h.last[p.Spec.NodeName] = held{pod: *p.DeepCopy()}
+		}
+	}
+	for node := range h.fromPool {
+		if up[node] {
+			delete(h.fromPool, node)
+		}
+	}
+	for i := range s.Pools {
+		pool := &s.Pools[i]
+		for _, st := range pool.Status.Slots {
+			node := st.Node
+			if _, ok := h.last[node]; ok || st.State != v1.SlotActive || node == "" || up[node] || h.fromPool[node] == st.ID {
+				continue
+			}
+			h.fromPool[node] = st.ID
+			h.last[node] = held{pod: servingPod(pool, st)}
 		}
 	}
 	for node, g := range h.last {
@@ -97,6 +122,28 @@ func (h *Hold) Apply(s *Snapshot, now time.Time) time.Duration {
 		s.Agents = append([]corev1.Pod{*p}, s.Agents...)
 	}
 	return next
+}
+
+// servingPod stands in for the agent pod of the gateway serving st, for a
+// hold taken from the pool's status. Its node's live agent pod supplies the
+// WireGuard key.
+func servingPod(pool *v1.EgressPool, st v1.SlotStatus) corev1.Pod {
+	tunnel := pool.Spec.Tunnel
+	if tunnel == "" {
+		tunnel = v1.TunnelGeneve
+	}
+	raw, _ := json.Marshal(v1.Gateway{Pool: pool.Name, SlotID: st.ID, Tunnel: tunnel})
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "held-" + st.Node,
+			Labels:      map[string]string{v1.LabelGateway: "true", v1.LabelPool: pool.Name},
+			Annotations: map[string]string{v1.AnnotationGateway: string(raw)},
+		},
+		Spec: corev1.PodSpec{NodeName: st.Node},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+			Type: v1.ConditionGatewayReady, Status: corev1.ConditionTrue, Reason: "Serving", Message: v1.GatewayReadyMessage(st.ID),
+		}}},
+	}
 }
 
 // starting reports whether p, the node's live agent pod if any, is still
