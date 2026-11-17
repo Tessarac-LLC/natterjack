@@ -69,6 +69,8 @@ type Snapshot struct {
 	Excluded []netip.Prefix
 	// Down are gateways this node's probes see as down.
 	Down map[netip.Addr]bool
+	// Pools, for the controller's view of each slot.
+	Pools []v1.EgressPool
 }
 
 // Compute derives the node's data path. Problems are reported, not fatal:
