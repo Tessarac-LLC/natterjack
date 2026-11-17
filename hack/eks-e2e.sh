@@ -362,6 +362,20 @@ flow_gap() {
 }
 # keep_flows POD: keep the record of a pod's requests in $OUT.
 keep_flows() { cp "$work/flows-$1" "$OUT/flows-$1-$(date -u +%H%M%S)"; }
+# gap_fail POD MESSAGE: keeps the record of POD's requests, prints each
+# failed request with its time and where every agent ran and since when,
+# then fails with MESSAGE.
+gap_fail() {
+	keep_flows "$1"
+	echo "failed requests from $1 (on $(kubectl -n e2e get pod "$1" -o jsonpath='{.spec.nodeName}')):" >&2
+	awk '$2 == "FAIL"' "$work/flows-$1" | while read -r ms rest; do
+		echo "  $(date -u -d "@$((ms / 1000))" +%H:%M:%S).$(printf '%03d' $((ms % 1000))) $rest"
+	done >&2
+	echo "agents (node, started, container started):" >&2
+	kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent \
+		-o jsonpath='{range .items[*]}  {.metadata.name} {.spec.nodeName} {.status.startTime} {.status.containerStatuses[0].state.running.startedAt}{"\n"}{end}' >&2 || true
+	fail "$2"
+}
 # flows_in_zone POD ZONE: whether every answered request left from a slot in
 # ZONE. The record is kept in $OUT, and each answer from elsewhere is printed
 # with its time.
@@ -409,7 +423,7 @@ for uid in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o j
 	[[ " $old_agents " != *" $uid "* ]] || fail "agent pod $uid was not restarted"
 done
 gap="$(flow_gap steered-a)"
-((gap == 0)) || fail "new connections failed for ${gap}ms during the agent restart"
+((gap == 0)) || gap_fail steered-a "new connections failed for ${gap}ms during the agent restart"
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} during the restart"
 for p in steered-a steered-b; do
 	n0="$(lines "$p")"
@@ -443,7 +457,7 @@ sleep 5
 kill "$watch" 2>/dev/null || true
 wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
-((gap == 0)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms while $gw drained"; }
+((gap == 0)) || gap_fail steered-a "new connections failed for ${gap}ms while $gw drained"
 flows_in_zone steered-a "${zones[0]}" || fail "a connection left outside ${zones[0]} during the drain"
 kubectl uncordon "$gw" >/dev/null
 record "drain: $id moved from $gw to $(slot "$id" node) after ${moved_after}s (drainSeconds 20); no new connection failed"
@@ -542,7 +556,7 @@ wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
 # The probes notice in about a second; a request in flight then can wait
 # out its own one-second timeout.
-((gap <= 3000)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms after the gateway died"; }
+((gap <= 3000)) || gap_fail steered-a "new connections failed for ${gap}ms after the gateway died"
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after the gateway died"
 record "failover: longest run of failed new connections ${gap}ms; $id active on $(slot "$id" node) after ${moved_after}s"
 eventually 900 "the node group replaces the terminated node" nodes_ready
@@ -579,7 +593,7 @@ sleep 10
 kill "$watch" 2>/dev/null || true
 wait "$watch" 2>/dev/null || true
 gap="$(flow_gap steered-a)"
-((gap <= 3000)) || { keep_flows steered-a; fail "new connections failed for ${gap}ms after $gw rebooted"; }
+((gap <= 3000)) || gap_fail steered-a "new connections failed for ${gap}ms after $gw rebooted"
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after $gw rebooted"
 unmanaged || fail "the VPC CNI added addresses to a slot interface after the reboot"
 record "reboot: $gw back after ${up_after}s; $id on $(slot "$id" node); longest run of failed new connections ${gap}ms; no slot interface gained a secondary address"
