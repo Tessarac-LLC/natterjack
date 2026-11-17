@@ -342,6 +342,7 @@ func (a *Agent) snapshot(ctx context.Context) (*agent.Snapshot, []v1.EgressPool,
 	s.Namespaces = nss.Items
 	s.Policies = pols.Items
 	s.ClusterPolicies = cpols.Items
+	s.Pools = pools.Items
 	return s, pools.Items, nil
 }
 

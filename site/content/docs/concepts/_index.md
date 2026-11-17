@@ -208,6 +208,8 @@ not in the agent, and so does the program that answers probes: it keeps
 answering while the agent is gone, and only while the slot can still send
 traffic out. The controller holds a restarting agent's slot for a minute,
 the new agent picks up its saved assignment from `/run/natterjack`, and
-other nodes keep sending flows to the gateway meanwhile. Open connections
+other nodes keep sending flows to the gateway meanwhile. That includes a
+node whose own agent restarts at the same time and so never saw the gateway
+serve: it goes by the pool's status, where the slot stays active. Open connections
 through it stay up. An agent that is down for more than a minute is treated
 as failed, and its slot moves as above.

@@ -192,3 +192,75 @@ func TestHoldKeepsTheWireGuardKey(t *testing.T) {
 		t.Fatal("a held WireGuard gateway lost its key")
 	}
 }
+
+// pools is the "web" pool's status, with a1's slot in state.
+func pools(state v1.SlotState) []v1.EgressPool {
+	return []v1.EgressPool{{
+		ObjectMeta: metav1.ObjectMeta{Name: "web"},
+		Status: v1.EgressPoolStatus{Slots: []v1.SlotStatus{
+			{ID: "eni-a1", Zone: "zone-a", Node: "a1", State: state},
+			{ID: "eni-a2", Zone: "zone-a", Node: "a2", State: v1.SlotActive},
+			{ID: "eni-b1", Zone: "zone-b", Node: "b1", State: v1.SlotActive},
+		}},
+	}}
+}
+
+// An agent that starts while a gateway restarts never saw it serve. The
+// controller keeps that gateway's slot active, and the hold takes it from
+// there instead of moving the zone's new flows elsewhere.
+func TestHoldFromThePoolAfterThisAgentRestarts(t *testing.T) {
+	a1 := netip.MustParseAddr("10.0.1.10")
+	t0 := time.Unix(1_800_000_000, 0)
+	pending := freshAgent(gatewayCond(corev1.ConditionFalse, v1.ReasonSelfTestPending, ""))
+	assigned := gatewayPod("a1", false)
+	assigned.Name = "agent-a1-new"
+	assigned.Status.Conditions = []corev1.PodCondition{gatewayCond(corev1.ConditionFalse, v1.ReasonSelfTestPending, "")}
+	for _, tc := range []struct {
+		name  string
+		next  *corev1.Pod
+		state v1.SlotState
+		held  bool
+	}{
+		{name: "old pod gone, no new pod", state: v1.SlotActive, held: true},
+		{name: "new pod waits for its self-test", next: pending, state: v1.SlotActive, held: true},
+		{name: "new pod assigned, waiting for its self-test", next: &assigned, state: v1.SlotActive, held: true},
+		{name: "slot still attaching: never served", next: pending, state: v1.SlotAttaching},
+		{name: "slot draining", next: pending, state: v1.SlotDraining},
+		{name: "new pod failed its self-test", next: freshAgent(gatewayCond(corev1.ConditionFalse, "SelfTestFailed", "timeout")), state: v1.SlotActive},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Hold{For: 90 * time.Second}
+			s := restarting(tc.next)
+			s.Pools = pools(tc.state)
+			left := h.Apply(s, t0)
+			d, problems := Compute(s, mustMarks(t))
+			if len(problems) > 0 {
+				t.Fatal(problems)
+			}
+			if got := slices.Contains(ringGateways(d), a1); got != tc.held {
+				t.Fatalf("a1 in the ring: %v, want %v", got, tc.held)
+			}
+			if tc.held && left != 90*time.Second {
+				t.Fatalf("hold ends in %s, want 90s", left)
+			}
+		})
+	}
+
+	// Like any hold, it ends once for the outage, though the controller
+	// still counts the slot active.
+	h := &Hold{For: 90 * time.Second}
+	s := restarting(pending)
+	s.Pools = pools(v1.SlotActive)
+	h.Apply(s, t0)
+	s = restarting(pending)
+	s.Pools = pools(v1.SlotActive)
+	if left := h.Apply(s, t0.Add(90*time.Second)); left != 0 {
+		t.Fatalf("held for %s past the hold", left)
+	}
+	s = restarting(pending)
+	s.Pools = pools(v1.SlotActive)
+	h.Apply(s, t0.Add(91*time.Second))
+	if d, _ := Compute(s, mustMarks(t)); slices.Contains(ringGateways(d), a1) {
+		t.Fatal("the hold came back after it ended")
+	}
+}
