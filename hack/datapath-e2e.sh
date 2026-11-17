@@ -69,6 +69,29 @@ fail() {
 	exit 1
 }
 # eventually SECONDS DESCRIPTION COMMAND...: retries COMMAND every second.
+# Release hosts and chart repositories answer 5xx now and then; every
+# download is retried rather than failing the run.
+istio_charts=https://istio-release.storage.googleapis.com/charts
+linkerd_charts=https://helm.linkerd.io/edge
+# fetch URL: the document at URL, saved under $work; prints its path.
+fetch() {
+	local f
+	f="$work/fetched/$(printf '%s' "$1" | sha256sum | cut -c1-16)-${1##*/}"
+	mkdir -p "$work/fetched"
+	curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --max-time 120 -o "$f" "$1" || fail "could not download $1"
+	printf '%s' "$f"
+}
+# chart REPO_URL NAME VERSION: the chart pulled under $work; prints its path.
+chart() {
+	local i d="$work/charts/$2-$3"
+	mkdir -p "$d"
+	for i in 1 2 3 4 5; do
+		helm pull "$2" --repo "$1" --version "$3" -d "$d" >/dev/null 2>&1 && break
+		((i < 5)) || fail "could not pull chart $2 $3 from $1"
+		sleep $((i * 5))
+	done
+	printf '%s' "$d"/*.tgz
+}
 eventually() {
 	local secs="$1" what="$2"
 	shift 2
@@ -134,11 +157,9 @@ case "$cni" in
 kindnet) ;;
 cilium)
 	api_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node control-plane)")"
-	helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true
-	helm repo update cilium >/dev/null
 	# kube-proxy-free with eBPF host routing: pod traffic goes from the
 	# pod's device to the uplink without the host's netfilter hooks.
-	helm install cilium cilium/cilium --version "${CILIUM_VERSION:?set CILIUM_VERSION}" -n kube-system \
+	helm install cilium "$(chart https://helm.cilium.io cilium "${CILIUM_VERSION:?set CILIUM_VERSION}")" -n kube-system \
 		--set kubeProxyReplacement=true --set k8sServiceHost="$api_ip" --set k8sServicePort=6443 \
 		--set bpf.masquerade=true --set routingMode=native --set autoDirectNodeRoutes=true \
 		--set ipv4NativeRoutingCIDR=10.244.0.0/16 --set ipam.mode=kubernetes \
@@ -147,8 +168,8 @@ cilium)
 calico)
 	api_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$(node control-plane)")"
 	v="${CALICO_VERSION:?set CALICO_VERSION}"
-	kubectl create -f "https://raw.githubusercontent.com/projectcalico/calico/$v/manifests/operator-crds.yaml"
-	kubectl create -f "https://raw.githubusercontent.com/projectcalico/calico/$v/manifests/tigera-operator.yaml"
+	kubectl create -f "$(fetch "https://raw.githubusercontent.com/projectcalico/calico/$v/manifests/operator-crds.yaml")"
+	kubectl create -f "$(fetch "https://raw.githubusercontent.com/projectcalico/calico/$v/manifests/tigera-operator.yaml")"
 	# The eBPF data plane needs the API server's address without kube-proxy.
 	kubectl create -f - <<EOF
 apiVersion: v1
@@ -183,25 +204,22 @@ for n in $(kind get nodes --name "$cluster"); do docker exec "$n" sysctl -qw net
 
 if [[ -n "$mesh" ]]; then
 	step "mesh"
-	helm repo add istio https://istio-release.storage.googleapis.com/charts >/dev/null 2>&1 || true
-	helm repo add linkerd-edge https://helm.linkerd.io/edge >/dev/null 2>&1 || true
-	helm repo update istio linkerd-edge >/dev/null
 	case "$mesh" in
 	istio)
 		iv="${ISTIO_VERSION:?set ISTIO_VERSION}"
-		helm install istio-base istio/base -n istio-system --create-namespace --version "$iv" --wait >/dev/null
-		helm install istiod istio/istiod -n istio-system --version "$iv" --wait --timeout 10m >/dev/null
+		helm install istio-base "$(chart "$istio_charts" base "$iv")" -n istio-system --create-namespace --wait >/dev/null
+		helm install istiod "$(chart "$istio_charts" istiod "$iv")" -n istio-system --wait --timeout 10m >/dev/null
 		;;
 	ambient)
 		iv="${ISTIO_VERSION:?set ISTIO_VERSION}"
-		helm install istio-base istio/base -n istio-system --create-namespace --version "$iv" --wait >/dev/null
-		helm install istiod istio/istiod -n istio-system --version "$iv" --set profile=ambient --wait --timeout 10m >/dev/null
-		helm install istio-cni istio/cni -n istio-system --version "$iv" --set profile=ambient --wait --timeout 10m >/dev/null
-		helm install ztunnel istio/ztunnel -n istio-system --version "$iv" --wait --timeout 10m >/dev/null
+		helm install istio-base "$(chart "$istio_charts" base "$iv")" -n istio-system --create-namespace --wait >/dev/null
+		helm install istiod "$(chart "$istio_charts" istiod "$iv")" -n istio-system --set profile=ambient --wait --timeout 10m >/dev/null
+		helm install istio-cni "$(chart "$istio_charts" cni "$iv")" -n istio-system --set profile=ambient --wait --timeout 10m >/dev/null
+		helm install ztunnel "$(chart "$istio_charts" ztunnel "$iv")" -n istio-system --wait --timeout 10m >/dev/null
 		;;
 	linkerd)
-		kubectl apply --server-side -f \
-			"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION:?set GATEWAY_API_VERSION}/experimental-install.yaml" >/dev/null
+		kubectl apply --server-side -f "$(fetch \
+			"https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION:?set GATEWAY_API_VERSION}/experimental-install.yaml")" >/dev/null
 		# Linkerd's identity needs a trust anchor and an issuer under it.
 		pki="$work/linkerd"
 		mkdir -p "$pki"
@@ -214,8 +232,8 @@ if [[ -n "$mesh" ]]; then
 		openssl x509 -req -in "$pki/issuer.csr" -CA "$pki/ca.crt" -CAkey "$pki/ca.key" -CAcreateserial -days 2 \
 			-extfile "$pki/issuer.ext" -out "$pki/issuer.crt" 2>/dev/null
 		lv="${LINKERD_VERSION:?set LINKERD_VERSION}"
-		helm install linkerd-crds linkerd-edge/linkerd-crds -n linkerd --create-namespace --version "$lv" --wait >/dev/null
-		helm install linkerd-control-plane linkerd-edge/linkerd-control-plane -n linkerd --version "$lv" \
+		helm install linkerd-crds "$(chart "$linkerd_charts" linkerd-crds "$lv")" -n linkerd --create-namespace --wait >/dev/null
+		helm install linkerd-control-plane "$(chart "$linkerd_charts" linkerd-control-plane "$lv")" -n linkerd \
 			--set-file identityTrustAnchorsPEM="$pki/ca.crt" \
 			--set-file identity.issuer.tls.crtPEM="$pki/issuer.crt" \
 			--set-file identity.issuer.tls.keyPEM="$pki/issuer.key" --wait --timeout 10m >/dev/null
