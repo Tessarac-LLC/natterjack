@@ -36,6 +36,22 @@ func newWatch(now *time.Time, elected chan struct{}) *IdentityWatch {
 	}
 }
 
+// A new pod is not ready until it has found credentials, so a rollout of
+// pods without them stops before replacing the replicas that have them.
+func TestNotReadyUntilCredentialsFound(t *testing.T) {
+	now := time.Unix(1000, 0)
+	w := newWatch(&now, make(chan struct{}))
+	if err := w.Check(nil); err == nil || !strings.Contains(err.Error(), "not checked yet") {
+		t.Fatalf("ready before any credential check: %v", err)
+	}
+	if err := w.record(nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Check(nil); err != nil {
+		t.Fatalf("not ready with credentials: %v", err)
+	}
+}
+
 func TestLeaderWithoutCredentialsStepsDown(t *testing.T) {
 	now := time.Unix(1000, 0)
 	elected := make(chan struct{})

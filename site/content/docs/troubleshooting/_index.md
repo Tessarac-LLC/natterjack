@@ -89,7 +89,9 @@ Check, in order:
    is created. A controller pod created before its Pod Identity association
    or IRSA annotation has none, and restarting its container does not help.
    Its readiness check reports `no cloud credentials`, and the error ends
-   with `this pod has no workload identity`. Recreate the pods:
+   with `this pod has no workload identity`. A new pod is not ready until
+   it has found credentials, so a rollout of pods without them stalls and
+   the running replicas keep working. Recreate the pods:
 
    ```sh
    kubectl -n natterjack rollout restart deploy/natterjack-controller

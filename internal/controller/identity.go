@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -27,7 +28,9 @@ import (
 )
 
 // IdentityWatch checks this replica's cloud credentials on every replica,
-// leader or not. A replica that cannot get credentials is not ready, and a
+// leader or not. A replica is not ready until it has got credentials once,
+// nor while it cannot get them; a rollout of pods without credentials then
+// stops before it replaces the replicas that have them. A
 // leader that has been unable to for StepDownAfter gives up the lease, so a
 // replica that can takes over.
 //
@@ -47,6 +50,7 @@ type IdentityWatch struct {
 	Log     logr.Logger
 
 	mu      sync.Mutex
+	got     bool // credentials retrieved at least once
 	err     error
 	failing time.Time
 }
@@ -94,7 +98,7 @@ func (w *IdentityWatch) record(err error, leading bool) error {
 		if w.err != nil {
 			w.Log.Info("cloud credentials available again")
 		}
-		w.err, w.failing = nil, time.Time{}
+		w.got, w.err, w.failing = true, nil, time.Time{}
 		return nil
 	}
 	if w.err == nil {
@@ -118,12 +122,16 @@ func (w *IdentityWatch) leading() bool {
 	}
 }
 
-// Check is a healthz.Checker: not ready without credentials.
+// Check is a healthz.Checker: not ready without credentials, nor before
+// the first check has found them.
 func (w *IdentityWatch) Check(*http.Request) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.err != nil {
+	switch {
+	case w.err != nil:
 		return fmt.Errorf("no cloud credentials: %w", w.err)
+	case !w.got:
+		return errors.New("cloud credentials not checked yet")
 	}
 	return nil
 }
