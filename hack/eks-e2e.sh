@@ -347,13 +347,34 @@ eventually 60 "steered-a uses every gateway in ${zones[0]}" spread steered-a "${
 eventually 60 "steered-b uses every gateway in ${zones[1]}" spread steered-b "${zones[1]}"
 record "pod traffic: steered-a from $(from steered-a), steered-b from $(from steered-b); new connections of each spread over every gateway in its zone"
 
-# watch_flows ZONE POD SECONDS: opens a new connection every 200ms and
-# records "<epoch ms> <address>", or "<epoch ms> FAIL curl=<exit code>", to
-# $work/flows-POD.
+# watch_flows POD SECONDS: in POD, detached from this exec session, opens a
+# new connection every 200ms for up to SECONDS and records "<epoch ms>
+# <address>", or "<epoch ms> FAIL curl=<exit code>". stop_flows ends it and
+# copies the record to $work/flows-POD. A stream held open through the API
+# server for minutes can lose bytes or be reset, so none is.
 watch_flows() {
-	kubectl -n e2e exec "$2" -- bash -c "end=\$((SECONDS + $3)); while ((SECONDS < end)); do
-		a=\$(curl -fsS --max-time 1 http://$outside_ip/ 2>/dev/null) || a=\"FAIL curl=\$?\"; echo \"\$((\${EPOCHREALTIME/./} / 1000)) \${a:-EMPTY}\"; sleep 0.2; done" \
-		>"$work/flows-$2" 2>/dev/null
+	kubectl -n e2e exec -i "$1" -- bash -c 'cat >/tmp/flows.sh' <<'WATCH'
+echo $$ >/tmp/flows.pid
+end=$((SECONDS + $1))
+while ((SECONDS < end)); do
+	a=$(curl -fsS --max-time 1 "http://$2/" 2>/dev/null) || a="FAIL curl=$?"
+	echo "$((${EPOCHREALTIME/./} / 1000)) ${a:-EMPTY}"
+	sleep 0.2
+done
+WATCH
+	kubectl -n e2e exec "$1" -- bash -c "rm -f /tmp/flows /tmp/flows.pid; nohup bash /tmp/flows.sh $2 $outside_ip </dev/null >/tmp/flows 2>/dev/null &" ||
+		fail "could not start watching $1's connections"
+	eventually 10 "$1's connection watch started" kubectl -n e2e exec "$1" -- test -s /tmp/flows.pid
+}
+# flows_copied POD: copies POD's record to $work/flows-POD, whole: every
+# line an epoch millisecond and an address, or a failure.
+flows_copied() {
+	kubectl -n e2e exec "$1" -- cat /tmp/flows >"$work/flows-$1" 2>/dev/null &&
+		awk '$1 !~ /^[0-9]+$/ || !(NF == 2 || NF == 3 && $2 == "FAIL") { bad = 1 } END { exit bad }' "$work/flows-$1"
+}
+stop_flows() {
+	kubectl -n e2e exec "$1" -- bash -c "kill \$(cat /tmp/flows.pid) 2>/dev/null; true" >/dev/null 2>&1 || true
+	eventually 60 "$1's connection record copied whole" flows_copied "$1"
 }
 # flow_gap POD: the longest run of failed requests, in ms (0 if none).
 flow_gap() {
@@ -405,8 +426,7 @@ eventually 30 "steered-b's stream started" test -s "$work/stream-steered-b.out"
 placement() { kubectl get egresspool default -o jsonpath='{range .status.slots[*]}{.id}={.state}@{.node} {end}'; }
 before="$(placement)"
 old_agents="$(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.uid}')"
-watch_flows "${zones[0]}" steered-a 600 &
-watch=$!
+watch_flows steered-a 600
 kubectl -n "$ns" rollout restart "ds/$ds" >/dev/null
 kubectl -n "$ns" rollout status "ds/$ds" --timeout=900s >/dev/null &
 rollout=$!
@@ -417,8 +437,7 @@ while kill -0 "$rollout" 2>/dev/null; do
 	sleep 1
 done
 wait "$rollout" || fail "the agents did not roll out again"
-kill "$watch" 2>/dev/null || true
-wait "$watch" 2>/dev/null || true
+stop_flows steered-a
 for uid in $(kubectl -n "$ns" get pods -l app.kubernetes.io/component=agent -o jsonpath='{.items[*].metadata.uid}'); do
 	[[ " $old_agents " != *" $uid "* ]] || fail "agent pod $uid was not restarted"
 done
@@ -442,8 +461,7 @@ gw="$(gw_in "${zones[0]}")"
 spare="$(spare_in "${zones[0]}")"
 id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw\")].id}")"
 # The test pods are on the source nodes, so draining a gateway leaves them.
-watch_flows "${zones[0]}" steered-a 300 &
-watch=$!
+watch_flows steered-a 300
 start=$(date +%s)
 cordoned+=("$gw")
 kubectl drain "$gw" --ignore-daemonsets --delete-emptydir-data --timeout=300s >/dev/null || fail "drain of $gw failed"
@@ -454,8 +472,7 @@ eventually 300 "$id moves off the drained node" moved
 moved_after=$(($(date +%s) - start))
 [[ "$(node_zone "$(slot "$id" node)")" == "${zones[0]}" ]] || fail "$id moved out of its zone"
 sleep 5
-kill "$watch" 2>/dev/null || true
-wait "$watch" 2>/dev/null || true
+stop_flows steered-a
 gap="$(flow_gap steered-a)"
 ((gap == 0)) || gap_fail steered-a "new connections failed for ${gap}ms while $gw drained"
 flows_in_zone steered-a "${zones[0]}" || fail "a connection left outside ${zones[0]} during the drain"
@@ -543,16 +560,14 @@ record "interface limit: once freed, $id attached to $spare"
 step "gateway instance terminated"
 gw="$(gw_in "${zones[0]}")"
 id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw\")].id}")"
-watch_flows "${zones[0]}" steered-a 420 &
-watch=$!
+watch_flows steered-a 420
 sleep 5
 start=$(date +%s)
 aws ec2 terminate-instances --instance-ids "$(node_instance "$gw")" >/dev/null
 eventually 600 "$id moves off the terminated node" moved
 moved_after=$(($(date +%s) - start))
 sleep 10
-kill "$watch" 2>/dev/null || true
-wait "$watch" 2>/dev/null || true
+stop_flows steered-a
 gap="$(flow_gap steered-a)"
 # The probes notice in about a second; a request in flight then can wait
 # out its own one-second timeout.
@@ -576,8 +591,7 @@ unmanaged() {
 }
 gw="$(gw_in "${zones[0]}")"
 id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw\")].id}")"
-watch_flows "${zones[0]}" steered-a 600 &
-watch=$!
+watch_flows steered-a 600
 sleep 5
 start=$(date +%s)
 aws ec2 reboot-instances --instance-ids "$(node_instance "$gw")" >/dev/null
@@ -590,8 +604,7 @@ kubectl -n "$ns" rollout status "ds/$ds" --timeout=300s >/dev/null || fail "the 
 eventually 300 "every slot active after the reboot" all_active
 for n in $(gateways); do eventually 120 "$n passes its self-test" gw_ready "$n"; done
 sleep 10
-kill "$watch" 2>/dev/null || true
-wait "$watch" 2>/dev/null || true
+stop_flows steered-a
 gap="$(flow_gap steered-a)"
 ((gap <= 3000)) || gap_fail steered-a "new connections failed for ${gap}ms after $gw rebooted"
 flows_in_zone steered-a "${zones[0]}" || fail "a new connection left outside ${zones[0]} after $gw rebooted"
