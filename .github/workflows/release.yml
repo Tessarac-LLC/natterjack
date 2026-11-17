@@ -1,6 +1,6 @@
 name: release
 
-# A release is a signed tag vMAJOR.MINOR.PATCH[-PRERELEASE] on a commit of
+# A release is a tag vMAJOR.MINOR.PATCH[-PRERELEASE] on a commit of
 # main. It publishes multi-arch images and the chart to GHCR, signs each
 # with cosign (keyless, this workflow's identity), attaches SBOMs and SLSA
 # build provenance, and creates the GitHub release with the CLI archives,
