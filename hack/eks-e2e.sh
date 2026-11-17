@@ -466,7 +466,29 @@ spare_instance="$(node_instance "$spare")"
 id="$(kubectl get egresspool default -o jsonpath="{.status.slots[?(@.node==\"$gw\")].id}")"
 max="$(aws ec2 describe-instance-types --instance-types "$(kubectl get node "$spare" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}')" \
 	--query 'InstanceTypes[0].NetworkInfo.MaximumNetworkInterfaces' --output text)"
-used="$(aws ec2 describe-instances --instance-ids "$spare_instance" --query 'length(Reservations[0].Instances[0].NetworkInterfaces)' --output text)"
+# The VPC CNI releases its spare interfaces a while after pods leave a
+# node, and the drain step just emptied this one: count only once the
+# node's interfaces have stayed the same, none detaching, for a minute.
+attachments() {
+	aws ec2 describe-network-interfaces --filters "Name=attachment.instance-id,Values=$spare_instance" \
+		--query 'sort_by(NetworkInterfaces, &NetworkInterfaceId)[].[NetworkInterfaceId,Attachment.Status]' --output text
+}
+settled_for=0
+last=""
+waited=0
+until ((settled_for >= 60)); do
+	((waited < 600)) || fail "$spare's interfaces did not settle in 600s: $(attachments | tr '\n' ' ')"
+	waited=$((waited + 10))
+	now="$(attachments)"
+	if [[ "$now" == "$last" && "$now" != *detaching* ]]; then
+		settled_for=$((settled_for + 10))
+	else
+		settled_for=0
+	fi
+	last="$now"
+	sleep 10
+done
+used="$(wc -l <<<"$last" | tr -d ' ')"
 subnet="$(aws ec2 describe-instances --instance-ids "$spare_instance" --query 'Reservations[0].Instances[0].SubnetId' --output text)"
 for _ in $(seq $((used + 1)) "$max"); do
 	eni="$(aws ec2 create-network-interface --subnet-id "$subnet" --description "natterjack e2e filler" \
@@ -479,6 +501,8 @@ for _ in $(seq $((used + 1)) "$max"); do
 		((idx < 16)) || fail "could not attach filler $eni to $spare"
 	done
 done
+full() { [[ "$(attachments | grep -cw attached)" == "$max" ]]; }
+eventually 60 "$spare holds $max attached interfaces" full
 echo "$spare holds $max of $max interfaces"
 cordoned+=("$gw")
 kubectl drain "$gw" --ignore-daemonsets --delete-emptydir-data --timeout=300s >/dev/null || fail "drain of $gw failed"
