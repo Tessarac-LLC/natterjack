@@ -651,7 +651,22 @@ eventually 300 "CloudAccess false" denied
 why="$(kubectl get egresspool default -o jsonpath='{.status.conditions[?(@.type=="CloudAccess")].message}')"
 [[ "$why" == *"this pod has no workload identity"* ]] || fail "CloudAccess does not say the pod has no workload identity: $why"
 record "identity broken: CloudAccess False: $why"
-node_steered steered-a "${zones[0]}" || fail "traffic stopped while the controller had no cloud access"
+# The data path does not need the controller, so new connections still leave
+# from the zone. One request over the internet can lose its SYN and the
+# retry, so it gets three tries: an outage fails them all, and an answer
+# from outside the zone fails at once.
+steered_without_cloud() {
+	local ip
+	for _ in 1 2 3; do
+		if ip="$(from steered-a)"; then
+			in_zone "${zones[0]}" "$ip" && return 0
+			fail "traffic left from $ip, outside ${zones[0]}, while the controller had no cloud access"
+		fi
+		sleep 2
+	done
+	return 1
+}
+steered_without_cloud || fail "traffic stopped while the controller had no cloud access"
 tf_apply
 # EKS injects credentials when a pod is admitted, and a new association
 # takes a moment to reach the admission webhook: restart until every
