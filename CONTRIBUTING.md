@@ -47,9 +47,13 @@ Commits made in the GitHub web editor are signed off automatically.
 | `scan / dependencies` | GitHub dependency review: no new vulnerable or disallowed-licence dependencies |
 | `site / build` | The website builds with no broken internal links |
 | `go / lint`, `go / test`, `go / vuln`, `go / codeql` | generated files up to date, golangci-lint, unit and envtest suites with the race detector, govulncheck, CodeQL security queries |
-| `helm / lint` | helm lint, chart-testing, schema and kubeconform validation |
-| `images / build` | Multi-arch images build; Trivy finds no fixable HIGH/CRITICAL vulnerabilities |
-| `e2e / kind` | The end-to-end suite on a kind cluster: data path, failover and the security tests |
+| `go / fuzz` | Every Go fuzz target for 60 seconds |
+| `go / dataplane` | The kernel data path tests in throwaway privileged containers |
+| `chart / lint` | helm lint, every rendering valid against the Kubernetes schemas, bad input refused |
+| `chart / e2e (…)` | The chart installed on kind for each supported Kubernetes version: readiness, RBAC, admission policies, recovery |
+| `datapath / e2e (…)` | Real egress traffic on kind for each CNI and service mesh: safety checks, failover, steering and the security tests |
+| `release / dry-run` | The release built against a local registry: multi-arch images with SBOMs, a chart that installs them, reproducible CLI archives |
+| `terraform / check` | Terraform format, validate, tests and docs; cfn-lint on the CloudFormation templates |
 
 All of them must pass before a pull request can merge.
 

@@ -4,7 +4,8 @@ name: release
 # main. It publishes multi-arch images and the chart to GHCR, signs each
 # with cosign (keyless, this workflow's identity), attaches SBOMs and SLSA
 # build provenance, and creates the GitHub release with the CLI archives,
-# which carry provenance too, and lists the chart on Artifact Hub.
+# which carry provenance too, signs every release file with cosign, and
+# lists the chart on Artifact Hub.
 on:
   push:
     tags: ["v*.*.*"]
@@ -125,6 +126,7 @@ jobs:
           subject-digest: ${{ steps.release.outputs.cli }}
           push-to-registry: true
       - name: CLI archive provenance
+        id: cli-provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/natterjack_*
@@ -134,6 +136,21 @@ jobs:
           subject-name: ${{ env.REGISTRY }}/charts/natterjack
           subject-digest: ${{ steps.release.outputs.chart }}
           push-to-registry: true
+      # The release carries its own proof: a cosign bundle next to every file
+      # and the archives' provenance, so neither needs the registry or the
+      # attestations API to check.
+      - name: Sign release files
+        env:
+          TAG: ${{ github.ref_name }}
+          PROVENANCE: ${{ steps.cli-provenance.outputs.bundle-path }}
+        working-directory: dist
+        run: |
+          files=(./*.tgz ./natterjack_* release.json)
+          sha256sum "${files[@]}" >SHA256SUMS
+          for f in "${files[@]}" SHA256SUMS; do
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" >/dev/null
+          done
+          jq -c . "$PROVENANCE" >"natterjack_${TAG}.intoto.jsonl"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
@@ -206,10 +223,21 @@ jobs:
           gh attestation verify oci://$controller --repo $REPO
           gh attestation verify natterjack_${TAG}_linux_amd64.tar.gz --repo $REPO
           \`\`\`
+
+          Every file here has a cosign bundle beside it, and
+          \`natterjack_${TAG}.intoto.jsonl\` holds the archives' provenance:
+
+          \`\`\`sh
+          cosign verify-blob natterjack_${TAG}_linux_amd64.tar.gz \\
+            --bundle natterjack_${TAG}_linux_amd64.tar.gz.sigstore.json \\
+            --certificate-identity $identity \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          gh attestation verify natterjack_${TAG}_linux_amd64.tar.gz --repo $REPO \\
+            --bundle natterjack_${TAG}.intoto.jsonl
+          \`\`\`
           NOTES
           prerelease=()
           [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
-          (cd dist && sha256sum ./*.tgz ./natterjack_* release.json >SHA256SUMS)
           gh release create "$TAG" --repo "$REPO" --verify-tag --title "$TAG" \
             --notes-file notes.md --generate-notes "${prerelease[@]}" \
-            dist/*.tgz dist/natterjack_* dist/release.json dist/SHA256SUMS
+            dist/*

@@ -74,6 +74,17 @@ test: $(SETUP_ENVTEST) ## Unit and envtest suites with the race detector
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use -p path $(ENVTEST_K8S_VERSION) --bin-dir $(BIN)/k8s)" \
 		go test -race -count=1 -coverprofile=cover.out ./...
 
+FUZZTIME ?= 60s
+
+.PHONY: fuzz
+fuzz: ## Run every fuzz target for FUZZTIME each
+	@set -e; for pkg in $$(go list ./...); do \
+		for f in $$(go test -list '^Fuzz' $$pkg | grep '^Fuzz' || true); do \
+			echo "fuzz $$pkg $$f"; \
+			go test $$pkg -run '^$$' -fuzz "^$$f$$" -fuzztime $(FUZZTIME); \
+		done; \
+	done
+
 .PHONY: test-privileged
 test-privileged: ## Data path tests in throwaway privileged containers (needs Docker)
 	./hack/test-privileged.sh
