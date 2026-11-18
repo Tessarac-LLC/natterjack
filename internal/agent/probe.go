@@ -163,9 +163,7 @@ func (p *Prober) run(ctx context.Context, t *prober) {
 		}
 		sent++
 		if conn != nil {
-			var b [probeLen]byte
-			copy(b[:], probeMagic)
-			binary.BigEndian.PutUint64(b[len(probeMagic):], sent)
+			b := probePacket(sent)
 			if _, err := conn.Write(b[:]); err != nil {
 				// A route change or an ICMP error; open a fresh socket.
 				_ = conn.Close()
@@ -192,10 +190,10 @@ func readReplies(c net.Conn, acked *atomic.Uint64) {
 		if err != nil {
 			continue // an ICMP error reported once on a connected socket
 		}
-		if n != probeLen || string(b[:len(probeMagic)]) != probeMagic {
+		seq, ok := parseProbe(b[:n])
+		if !ok {
 			continue
 		}
-		seq := binary.BigEndian.Uint64(b[len(probeMagic):probeLen])
 		for {
 			cur := acked.Load()
 			if seq <= cur || acked.CompareAndSwap(cur, seq) {
@@ -203,4 +201,21 @@ func readReplies(c net.Conn, acked *atomic.Uint64) {
 			}
 		}
 	}
+}
+
+// probePacket is the probe for sequence number seq: the magic, then seq.
+func probePacket(seq uint64) [probeLen]byte {
+	var b [probeLen]byte
+	copy(b[:], probeMagic)
+	binary.BigEndian.PutUint64(b[len(probeMagic):], seq)
+	return b
+}
+
+// parseProbe reads the sequence number from an echoed probe, and reports
+// false for anything else that reached the socket.
+func parseProbe(b []byte) (uint64, bool) {
+	if len(b) != probeLen || string(b[:len(probeMagic)]) != probeMagic {
+		return 0, false
+	}
+	return binary.BigEndian.Uint64(b[len(probeMagic):]), true
 }
