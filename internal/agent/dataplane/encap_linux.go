@@ -45,19 +45,19 @@ var _ netlink.Encap = (*tunnelEncap)(nil)
 func (e *tunnelEncap) Type() int { return nl.LWTUNNEL_ENCAP_IP }
 
 func (e *tunnelEncap) Decode(buf []byte) error {
-	attrs, err := nl.ParseRouteAttr(buf)
+	attrs, err := parseRouteAttrs(buf)
 	if err != nil {
 		return fmt.Errorf("decode tunnel encap: %w", err)
 	}
 	for _, a := range attrs {
-		switch a.Attr.Type {
+		switch a.typ {
 		case lwtIPID:
-			if len(a.Value) != 8 {
+			if len(a.value) != 8 {
 				return errors.New("decode tunnel encap: bad id length")
 			}
-			e.ID = binary.BigEndian.Uint64(a.Value)
+			e.ID = binary.BigEndian.Uint64(a.value)
 		case lwtIPDst:
-			ip, ok := netip.AddrFromSlice(a.Value)
+			ip, ok := netip.AddrFromSlice(a.value)
 			if !ok {
 				return errors.New("decode tunnel encap: bad destination")
 			}
@@ -65,6 +65,28 @@ func (e *tunnelEncap) Decode(buf []byte) error {
 		}
 	}
 	return nil
+}
+
+type routeAttr struct {
+	typ   uint16
+	value []byte
+}
+
+// parseRouteAttrs splits buf into rtattrs. nl.ParseRouteAttr panics when
+// the last attribute's length is not a multiple of four, so this parses
+// with every bound checked.
+func parseRouteAttrs(buf []byte) ([]routeAttr, error) {
+	const hdr = 4
+	var attrs []routeAttr
+	for len(buf) >= hdr {
+		l := int(nl.NativeEndian().Uint16(buf[0:2]))
+		if l < hdr || l > len(buf) {
+			return nil, fmt.Errorf("attribute length %d does not fit %d bytes", l, len(buf))
+		}
+		attrs = append(attrs, routeAttr{typ: nl.NativeEndian().Uint16(buf[2:4]), value: buf[hdr:l]})
+		buf = buf[min((l+3)&^3, len(buf)):]
+	}
+	return attrs, nil
 }
 
 func (e *tunnelEncap) Encode() ([]byte, error) {

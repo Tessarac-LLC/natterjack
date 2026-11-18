@@ -31,6 +31,8 @@ func FuzzTunnelEncap(f *testing.F) {
 	f.Add(good, uint64(7), []byte{10, 0, 1, 10})
 	f.Add([]byte{}, uint64(0), []byte{0, 0, 0, 0})
 	f.Add([]byte{4, 0, 1, 0}, uint64(1), []byte{1, 2, 3, 4})
+	// A last attribute whose length is not a multiple of four.
+	f.Add([]byte{9, 0, 1, 0, 1, 2, 3, 4, 5, 0}, uint64(1), []byte{1, 2, 3, 4})
 	f.Fuzz(func(t *testing.T, buf []byte, id uint64, dst []byte) {
 		var e tunnelEncap
 		_ = e.Decode(buf)
