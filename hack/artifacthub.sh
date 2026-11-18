@@ -59,9 +59,13 @@ esac
 
 repo="$(jq -nc --arg name "$NAME" --arg url "oci://$CHART" \
   '{kind: 0, name: $name, display_name: "Natterjack", url: $url}')"
+# Search is the only way to read a repository's ID, and its responses are
+# cached for an hour at the CDN: a lookup just after creating the repository
+# would get the empty answer cached a moment before. A unique query
+# parameter keeps every lookup off the cache.
 lookup() {
   local code
-  code="$(ah GET "/repositories/search?kind=0&org=$ORG&name=$NAME&limit=60")"
+  code="$(ah GET "/repositories/search?kind=0&org=$ORG&name=$NAME&limit=60&nocache=$(date +%s)$RANDOM")"
   [[ "$code" == 200 ]] || fail "searching for repository $NAME" "$code"
   jq -r --arg name "$NAME" --arg org "$ORG" \
     '[.[] | select(.name == $name and .organization_name == $org)][0].repository_id // empty' "$work/body"
@@ -71,7 +75,11 @@ if [[ -z "$id" ]]; then
   code="$(ah POST "/repositories/org/$ORG" "$repo")"
   [[ "$code" == 201 ]] || fail "creating repository $NAME" "$code"
   echo "artifacthub: created repository $ORG/$NAME for oci://$CHART"
-  id="$(lookup)"
+  for _ in 1 2 3 4 5 6; do
+    id="$(lookup)"
+    [[ -z "$id" ]] || break
+    sleep 5
+  done
   [[ -n "$id" ]] || { echo "artifacthub: repository $NAME not found after creating it" >&2; exit 1; }
 else
   code="$(ah PUT "/repositories/org/$ORG/$NAME" "$repo")"
