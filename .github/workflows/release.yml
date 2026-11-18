@@ -164,6 +164,11 @@ jobs:
       contents: read
       packages: write # push the repository metadata to the chart's repository
     uses: ./.github/workflows/artifacthub.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+    # The key lives in the artifacthub environment; the called job reads it
+    # from there, but only once it is passed here by name.
+    secrets:
+      ARTIFACTHUB_API_KEY_ID: ${{ secrets.ARTIFACTHUB_API_KEY_ID }}
+      ARTIFACTHUB_API_KEY_SECRET: ${{ secrets.ARTIFACTHUB_API_KEY_SECRET }}
 
   github-release:
     name: release / github

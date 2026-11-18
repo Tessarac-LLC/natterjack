@@ -12,7 +12,14 @@ name: artifacthub
 
 on:
   workflow_dispatch:
+  # A called workflow sees an environment secret only when its caller
+  # passes it; otherwise it is silently empty.
   workflow_call:
+    secrets:
+      ARTIFACTHUB_API_KEY_ID:
+        required: true
+      ARTIFACTHUB_API_KEY_SECRET:
+        required: true
 
 permissions: {}
 
